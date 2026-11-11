@@ -79,6 +79,7 @@ const TEMPLATE = (debug: boolean): string => `
       <label class="chip"><input type="checkbox" id="voice" checked><span>Voice</span></label>
       <label class="chip"><input type="checkbox" id="notes-chk" checked><span>Notes</span></label>
       <label class="chip"><input type="checkbox" id="click"><span>Click</span></label>
+      <label class="chip" title="Backing drums on/off (style in the Backing row)"><input type="checkbox" id="drums-on" checked><span>Drums</span></label>
       <label class="chip" title="Hear your mic live — use headphones to avoid feedback"><input type="checkbox" id="monitor"><span>🎧 Monitor</span></label>
     </div>
     <div class="nowbox" title="During playback: the chord at the playhead (and the next one). Otherwise, with the mic ready: a live guess of what you're playing or singing.">
@@ -244,6 +245,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   const nameInput = $<HTMLInputElement>('name');
   const playBtn = $<HTMLButtonElement>('play');
   const clickChk = $<HTMLInputElement>('click');
+  const drumsOn = $<HTMLInputElement>('drums-on');
   const voiceChk = $<HTMLInputElement>('voice');
   const notesChk = $<HTMLInputElement>('notes-chk');
   const posEl = $<HTMLSpanElement>('pos');
@@ -290,6 +292,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       if (typeof p.chords === 'boolean') chordsChk.checked = p.chords;
       if (typeof p.rate === 'string') chordsRate.value = p.rate;
       if (typeof p.click === 'boolean') clickChk.checked = p.click;
+      if (typeof p.drumsOn === 'boolean') drumsOn.checked = p.drumsOn;
     }
   } catch {
     /* storage unavailable */
@@ -298,7 +301,13 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     try {
       localStorage.setItem(
         PREFS_KEY,
-        JSON.stringify({ drums: drumsSel.value, chords: chordsChk.checked, rate: chordsRate.value, click: clickChk.checked }),
+        JSON.stringify({
+          drums: drumsSel.value,
+          drumsOn: drumsOn.checked,
+          chords: chordsChk.checked,
+          rate: chordsRate.value,
+          click: clickChk.checked,
+        }),
       );
     } catch {
       /* ignore */
@@ -322,6 +331,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   };
 
   function drumPattern(): DrumPatternId {
+    if (!drumsOn.checked) return 'off';
     const v = drumsSel.value;
     return v === 'rock' || v === 'halftime' || v === 'four' || v === 'ballad' ? v : 'off';
   }
@@ -888,7 +898,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       if (player.playing) void startPlayback(player.position);
     });
   }
-  for (const el of [drumsSel, chordsChk, chordsRate]) {
+  for (const el of [drumsSel, drumsOn, chordsChk, chordsRate]) {
     el.addEventListener('change', () => {
       savePrefs();
       changed();
