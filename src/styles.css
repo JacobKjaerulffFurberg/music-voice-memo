@@ -1,0 +1,694 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161920;
+  --panel-2: #1e222b;
+  --fg: #eef0f4;
+  --muted: #8b93a3;
+  --line: #2a2f3a;
+  --accent: #ff4d6d;
+  --accent-2: #ffb02e;
+  --ok: #3ddc97;
+  --note-sel: #ffd166;
+  --roll-bg: #12151b;
+  --roll-row: #161a21;
+  --roll-inkey: #1c2230;
+  --roll-grid: #2a3140;
+  --roll-sub: #1b2029;
+  --roll-bar: #4a5570;
+  --roll-f0: #7fd1ff;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #eef0f3;
+    --panel: #f8f9fb;
+    --panel-2: #e7eaef;
+    --fg: #14171d;
+    --muted: #5d6573;
+    --line: #d5dae2;
+    --note-sel: #f4a100;
+    --roll-bg: #fbfbfd;
+    --roll-row: #f1f3f6;
+    --roll-inkey: #e3e9f4;
+    --roll-grid: #d4d9e2;
+    --roll-sub: #e9ecf1;
+    --roll-bar: #9aa4b8;
+    --roll-f0: #1b86c9;
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.35 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* One screen: the page never scrolls; panels scroll inside if they must. */
+body.daw {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#app {
+  height: 100%;
+}
+
+.app {
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 4px 0 8px;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-height: 34px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+button:hover {
+  border-color: var(--muted);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+button.ghost {
+  background: transparent;
+}
+button.small,
+select.small {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 13px;
+}
+select,
+input[type='number'],
+input.name {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 8px;
+  min-height: 30px;
+}
+input[type='number'] {
+  width: 64px;
+}
+.muted {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* ---------- top bar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.icon-btn {
+  min-width: 34px;
+  padding: 4px;
+}
+.takes-toggle {
+  display: none;
+}
+.rec-btn {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: 50%;
+  border: 3px solid var(--accent);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.rec-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: all 0.15s ease;
+}
+/* Mic armed: a subtle ring shows it's ready to record instantly. */
+.rec-btn.armed:not(.recording) {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.rec-btn.recording .rec-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+}
+.rec-btn.recording {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+}
+.rec-info {
+  width: 92px;
+  flex: none;
+}
+.timer {
+  font-size: 18px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.meter {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+  margin-top: 3px;
+}
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--ok), var(--accent-2) 80%, var(--accent));
+  transition: width 0.05s linear;
+}
+.meter-fill.clip {
+  background: var(--accent);
+}
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.play-btn {
+  width: 40px;
+  height: 36px;
+  font-size: 15px;
+  padding: 0;
+}
+.play-btn.playing {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #08140f;
+}
+.pos {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  width: 48px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+.chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.chip span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chip input:checked + span {
+  background: color-mix(in srgb, var(--accent-2) 22%, transparent);
+  border-color: var(--accent-2);
+  color: var(--fg);
+}
+/* "Which chord is playing" readout */
+.nowbox {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px 10px;
+  min-width: 150px;
+  flex: none;
+}
+.now-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  width: 36px;
+}
+.now-chord {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--accent-2);
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+}
+.now-chord.note {
+  color: var(--roll-f0);
+}
+.now-next {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.status {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------- body: takes sidebar + main ---------- */
+.body {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  min-height: 0;
+}
+.side {
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 8px 10px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-state {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+}
+.empty-state .big {
+  font-size: 56px;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.results {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px 10px;
+  gap: 6px;
+}
+.results[hidden],
+.empty-state[hidden] {
+  display: none;
+}
+
+.infobar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+input.name {
+  flex: 1 1 120px;
+  min-width: 90px;
+  font-weight: 600;
+}
+.infobar > select.small {
+  max-width: 150px;
+}
+.infobar {
+  gap: 6px;
+}
+.stat-input[type='number'] {
+  width: 64px;
+}
+#in-tune {
+  width: 48px;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 2px 10px;
+  min-width: 84px;
+  cursor: help;
+}
+.stat.edit {
+  cursor: default;
+  padding: 2px 6px 3px;
+}
+.stat.manual {
+  box-shadow: inset 0 0 0 1.5px var(--accent-2);
+}
+.stat-input,
+.stat-select {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 2px;
+  min-height: 0;
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  width: 76px;
+}
+.stat-select {
+  width: auto;
+  max-width: 150px;
+  cursor: pointer;
+}
+.stat-input:hover,
+.stat-select:hover,
+.stat-input:focus {
+  background: var(--bg);
+  outline: none;
+}
+.stat-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.mini {
+  min-height: 22px;
+  min-width: 22px;
+  padding: 0 4px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+.stat .label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.stat .value {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+.tb {
+  font-size: 12px;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.tb select {
+  min-height: 28px;
+  padding: 2px 6px;
+}
+.sel-info {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.spacer {
+  flex: 1;
+}
+.chord-list {
+  color: var(--accent-2);
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 45%;
+}
+.help {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.roll-host {
+  flex: 1;
+  min-height: 160px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  display: flex;
+}
+.roll {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  outline: none;
+}
+.roll:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent-2);
+}
+.roll-scroll {
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.roll canvas {
+  display: block;
+  touch-action: none;
+  user-select: none;
+}
+
+/* ---------- bottom control strip ---------- */
+.strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px 8px 6px;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.group legend {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+.slider input {
+  width: 90px;
+}
+.slider span {
+  width: 34px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------- takes list ---------- */
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.list li {
+  display: flex;
+  gap: 2px;
+  align-items: stretch;
+  border-radius: 8px;
+}
+.list li.active {
+  background: var(--panel-2);
+}
+.list li.active .item-title {
+  color: var(--accent);
+}
+.list li.empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 4px;
+}
+.item-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 6px 6px;
+}
+.item-title {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.item-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+.del {
+  border: 0;
+  color: var(--muted);
+  min-width: 28px;
+  padding: 0;
+}
+
+/* ---------- debug ---------- */
+.debug-panel {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+.debug-panel .field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.debug-panel input[type='file'] {
+  font-size: 11px;
+  max-width: 100%;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.row.tight label {
+  font-size: 12px;
+}
+.row.tight input[type='number'] {
+  width: 56px;
+}
+.debug-json pre {
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 8px;
+  border-radius: 8px;
+  margin: 0;
+}
+
+/* ---------- phones: takes become a drawer, header wraps ---------- */
+@media (max-width: 760px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .takes-toggle {
+    display: inline-block;
+  }
+  .side {
+    position: fixed;
+    z-index: 10;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 85vw);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.4);
+  }
+  .side.open {
+    transform: none;
+  }
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .status {
+    flex-basis: 100%;
+    order: 10;
+  }
+  .rec-info {
+    width: 72px;
+  }
+  .stat {
+    min-width: 0;
+    padding: 2px 8px;
+  }
+  .stat .value {
+    font-size: 15px;
+  }
+  .strip {
+    max-height: 32vh;
+    overflow-y: auto;
+  }
+  .chord-list {
+    display: none;
+  }
+}
