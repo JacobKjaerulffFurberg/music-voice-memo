@@ -19,6 +19,7 @@ import { analyzePolyFrames, trackPolyNotes, type PolyFrames } from './poly';
 import { detectOnsets } from './spectrum';
 import { chooseTempo, tempoFromBeatTicks, tempoFromNotes, tempoFromOnsets } from './tempo';
 import { estimateTuning, tuningFromNotes } from './tuning';
+import { assignVelocities } from './velocity';
 import type { AnalysisResult, InputSource, KeyResult, Note, PitchTrack, TempoResult, TuningResult } from './types';
 
 export interface RhythmInput {
@@ -113,6 +114,7 @@ export function analyze(
     notes = segmentNotes(pitch, tuning.cents, { onsets: onsetTimes });
     lap('notes');
   }
+  notes = assignVelocities(notes);
 
   const fromNotes = estimateKeyFromNotes(notes);
   const fromAudio = ext.audioKey ?? (source === 'melody' ? estimateKeyFromFrames(pitch, tuning.cents) : null);

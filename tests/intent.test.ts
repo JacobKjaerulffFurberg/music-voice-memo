@@ -126,6 +126,7 @@ describe('intent: quantize and legato', () => {
       quantizeGrid: 4,
       quantizeStrength: 1,
       legato: false,
+      minVelocity: 0,
     });
     const beat = 60 / (t?.bpm ?? 1);
     for (const n of notes) {

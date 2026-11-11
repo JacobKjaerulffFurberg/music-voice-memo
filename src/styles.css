@@ -692,3 +692,13 @@ input.name {
     display: none;
   }
 }
+
+.vel-input {
+  width: 52px;
+  min-height: 26px;
+  padding: 2px 6px;
+  font-variant-numeric: tabular-nums;
+}
+.tb[hidden] {
+  display: none;
+}

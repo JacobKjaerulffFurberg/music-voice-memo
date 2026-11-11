@@ -8,7 +8,7 @@ describe('edited notes', () => {
   const analysis = analyze(synthMelody(mel.notes, { bpm: 100 }), 44100);
 
   it('without edits, applies the interpretation pass (and nothing when it is all off)', () => {
-    const off = { fitToKey: false, quantizeGrid: 0, quantizeStrength: 0, legato: false };
+    const off = { fitToKey: false, quantizeGrid: 0, quantizeStrength: 0, legato: false, minVelocity: 0 };
     expect(effectiveAnalysis({ analysis, intent: off })?.notes.map((n) => n.start)).toEqual(analysis.notes.map((n) => n.start));
     const q = effectiveAnalysis({ analysis, intent: { ...off, quantizeGrid: 4, quantizeStrength: 1 } });
     const t = analysis.tempo.chosen;
@@ -23,7 +23,7 @@ describe('edited notes', () => {
     // Pretend the singer was actually 60 c flat of what was detected: every note moves down a semitone-ish.
     const t = analysis.tuning.cents;
     // Shift the reference by more than half a semitone so every (well-sung) note reads one semitone off.
-    const eff = effectiveAnalysis({ analysis, overrides: { tuningCents: t - 60 }, intent: { fitToKey: false, quantizeGrid: 0, quantizeStrength: 0, legato: false } });
+    const eff = effectiveAnalysis({ analysis, overrides: { tuningCents: t - 60 }, intent: { fitToKey: false, quantizeGrid: 0, quantizeStrength: 0, legato: false, minVelocity: 0 } });
     expect(eff?.tuning.cents).not.toBe(t);
     const moved = eff?.notes.filter((n, i) => n.midi !== analysis.notes[i].midi).length ?? 0;
     expect(moved).toBe(analysis.notes.length);

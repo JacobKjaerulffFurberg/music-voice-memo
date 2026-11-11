@@ -40,6 +40,8 @@ export interface Note {
   hz: number;
   /** Mean RMS of the note (linear). */
   level: number;
+  /** MIDI velocity 1–127 (from loudness relative to the take, or set by hand). */
+  velocity?: number;
 }
 
 export type Mode = 'major' | 'minor';

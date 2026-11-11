@@ -7,6 +7,7 @@
 import { analyzeInWorker } from '../analysis/client';
 import { DEFAULT_INTENT, type IntentOptions } from '../analysis/intent';
 import { keyName, noteName } from '../analysis/music';
+import { velocityOf } from '../analysis/velocity';
 import { liveGuess, newLiveState } from '../analysis/live';
 import { synthInstrument, synthMelody, TEST_MELODIES, type InstrumentEvent } from '../analysis/synth';
 import type { AnalysisResult, EnginePreference, KeyResult, Mode, Note } from '../analysis/types';
@@ -153,6 +154,8 @@ const TEMPLATE = (debug: boolean): string => `
           <button id="qsel" class="ghost small" title="Quantize selection (Ctrl+U)">Q</button>
           <button id="revert" class="ghost small" title="Throw away edits and go back to the detected melody">Revert</button>
           <span id="sel-info" class="sel-info"></span>
+          <label class="tb" id="vel-box" hidden title="Velocity of the selected notes (1–127)">Vel
+            <input id="vel" type="number" min="1" max="127" step="1" class="vel-input"></label>
           <span class="spacer"></span>
           <span id="chord-list" class="chord-list"></span>
           <button id="zoom-out" class="ghost small" title="Zoom out (Ctrl+wheel)">−</button>
@@ -176,6 +179,8 @@ const TEMPLATE = (debug: boolean): string => `
             <label class="slider" title="How strongly detected notes snap to the grid">Quantize
               <input type="range" id="q-strength" min="0" max="100" step="5"><span id="q-val"></span></label>
             <label class="check" title="Hold each note until the next one"><input type="checkbox" id="legato"> Legato</label>
+            <label class="slider" title="Hide detected notes quieter than this velocity — clears faint ghost notes">Min vel
+              <input type="range" id="min-vel" min="0" max="100" step="5"><span id="min-vel-val"></span></label>
           </fieldset>
 
           <fieldset class="group">
@@ -260,6 +265,10 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   const redoBtn = $<HTMLButtonElement>('redo');
   const revertBtn = $<HTMLButtonElement>('revert');
   const sourceSel = $<HTMLSelectElement>('source');
+  const velBox = $<HTMLLabelElement>('vel-box');
+  const velInput = $<HTMLInputElement>('vel');
+  const minVel = $<HTMLInputElement>('min-vel');
+  const minVelVal = $<HTMLSpanElement>('min-vel-val');
   const inBpm = $<HTMLInputElement>('in-bpm');
   const inTune = $<HTMLInputElement>('in-tune');
   const inBeat = $<HTMLInputElement>('in-beat');
@@ -548,8 +557,10 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     qStrength.value = String(Math.round(intent.quantizeStrength * 100));
     qVal.textContent = `${qStrength.value}%`;
     legatoChk.checked = intent.legato;
+    minVel.value = String(intent.minVelocity);
+    minVelVal.textContent = intent.minVelocity > 0 ? String(intent.minVelocity) : 'off';
     const chordsTake = isChordsTake(rec.analysis);
-    for (const el of [fitKeyChk, qStrength, legatoChk]) el.disabled = edited;
+    for (const el of [fitKeyChk, qStrength, legatoChk, minVel]) el.disabled = edited;
     if (chordsTake) legatoChk.disabled = true;
     sourceSel.value = rec.source ?? 'auto';
     const detected = rec.analysis?.input?.source;
@@ -704,6 +715,11 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   gridSel.addEventListener('change', () => setIntent({ quantizeGrid: Number(gridSel.value) }));
   fitKeyChk.addEventListener('change', () => setIntent({ fitToKey: fitKeyChk.checked }));
   legatoChk.addEventListener('change', () => setIntent({ legato: legatoChk.checked }));
+  minVel.addEventListener('input', () => {
+    const v = Number(minVel.value);
+    minVelVal.textContent = v > 0 ? String(v) : 'off';
+    setIntent({ minVelocity: v });
+  });
   qStrength.addEventListener('input', () => {
     qVal.textContent = `${qStrength.value}%`;
     setIntent({ quantizeStrength: Number(qStrength.value) / 100 });
@@ -733,12 +749,23 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   };
   roll.onNotesChange = (notes) => setEditedNotes(notes);
   roll.onSelect = (sel) => {
+    velBox.hidden = sel.length === 0;
     if (sel.length === 0) selInfo.textContent = '';
     else if (sel.length === 1) {
       const n = sel[0];
       selInfo.textContent = `${noteName(n.midi)} · ${n.start.toFixed(2)}s · ${Math.round(n.duration * 1000)}ms`;
     } else selInfo.textContent = `${sel.length} notes`;
+    if (sel.length && document.activeElement !== velInput) {
+      velInput.value = String(Math.round(sel.reduce((s, n) => s + velocityOf(n), 0) / sel.length));
+    }
   };
+  velInput.addEventListener('change', () => {
+    const v = Math.max(1, Math.min(127, Math.round(Number(velInput.value))));
+    if (Number.isFinite(v)) roll.editSelected((n) => (n.velocity = v), false);
+  });
+  velInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') velInput.blur();
+  });
   roll.onPreview = (midi) => {
     const s = settings();
     void player.preview(midi, voiceChk.checked && s ? s.tuningCents : 0);
@@ -810,7 +837,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     if (!current || !s) return;
     const arr = arrangement(s);
     const notes: PlayNote[] = notesChk.checked
-      ? (effectiveAnalysis(current)?.notes ?? []).map((n) => ({ midi: n.midi, start: n.start, duration: n.duration }))
+      ? (effectiveAnalysis(current)?.notes ?? []).map((n) => ({ midi: n.midi, start: n.start, duration: n.duration, velocity: velocityOf(n) }))
       : [];
     await player.play(current.samples, current.sampleRate, {
       from,

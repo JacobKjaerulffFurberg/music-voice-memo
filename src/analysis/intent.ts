@@ -11,6 +11,7 @@
  */
 
 import type { Mode, Note } from './types';
+import { velocityOf } from './velocity';
 
 export interface IntentOptions {
   fitToKey: boolean;
@@ -19,6 +20,8 @@ export interface IntentOptions {
   /** 0..1 */
   quantizeStrength: number;
   legato: boolean;
+  /** Drop detected notes quieter than this velocity (0 = keep all). Clears ghost notes. */
+  minVelocity: number;
 }
 
 export const DEFAULT_INTENT: IntentOptions = {
@@ -26,6 +29,7 @@ export const DEFAULT_INTENT: IntentOptions = {
   quantizeGrid: 4,
   quantizeStrength: 0.6,
   legato: false,
+  minVelocity: 0,
 };
 
 export interface IntentContext {
@@ -96,7 +100,7 @@ export function legato(notes: Note[], maxGapSec: number): Note[] {
 }
 
 export function applyIntent(notes: Note[], ctx: IntentContext, o: IntentOptions = DEFAULT_INTENT): Note[] {
-  let out = notes;
+  let out = o.minVelocity > 0 ? notes.filter((n) => velocityOf(n) >= o.minVelocity) : notes;
   if (o.fitToKey && ctx.key) out = fitToKey(out, ctx.key);
   out = quantizeNotes(out, ctx, o.quantizeGrid, o.quantizeStrength);
   if (o.legato && !ctx.polyphonic) out = legato(out, 60 / ctx.bpm);

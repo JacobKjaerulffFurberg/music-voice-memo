@@ -5,6 +5,7 @@ import { applyIntent, DEFAULT_INTENT, type IntentOptions } from './analysis/inte
 import { detectChords, refineKeyWithChords } from './analysis/chords';
 import { estimateKeyFromNotes } from './analysis/key';
 import { requantize } from './analysis/notes';
+import { assignVelocities } from './analysis/velocity';
 import type { AnalysisResult, InputSource, Mode, Note } from './analysis/types';
 
 export interface Overrides {
@@ -54,8 +55,11 @@ export function effectiveAnalysis(rec: {
   overrides?: Overrides;
   intent?: IntentOptions;
 }): AnalysisResult | null {
-  const raw = rec.analysis;
-  if (!raw) return raw;
+  const stored = rec.analysis;
+  if (!stored) return stored;
+  // Takes analysed before velocities existed get them computed from loudness.
+  const raw: AnalysisResult =
+    stored.notes.some((n) => n.velocity === undefined) ? { ...stored, notes: assignVelocities(stored.notes) } : stored;
   // A tuning override re-reads which semitone each detected note is.
   const tune = rec.overrides?.tuningCents;
   const a: AnalysisResult =

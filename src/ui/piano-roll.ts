@@ -21,6 +21,7 @@
 
 import { hzToMidi, noteName, scalePitchClasses } from '../analysis/music';
 import type { AnalysisResult, Note } from '../analysis/types';
+import { DEFAULT_VELOCITY, velocityOf } from '../analysis/velocity';
 import { beatTimes, type Settings } from '../model';
 import type { Chord } from '../music/arrange';
 
@@ -392,7 +393,15 @@ export class PianoRoll {
       const t = Math.max(0, e.altKey ? tp : this.snapTime(tp));
       const t0 = !e.altKey && this.gridUnit() > 0 && t > tp + 1e-6 ? t - this.gridUnit() : t;
       const level = this.notes.length ? this.notes.reduce((s, n) => s + n.level, 0) / this.notes.length : 0.1;
-      const note: Note = { midi, start: Math.max(0, t0), duration: this.lastLen, cents: 0, hz: 440 * Math.pow(2, (midi - 69) / 12), level };
+      const note: Note = {
+        midi,
+        start: Math.max(0, t0),
+        duration: this.lastLen,
+        cents: 0,
+        hz: 440 * Math.pow(2, (midi - 69) / 12),
+        level,
+        velocity: DEFAULT_VELOCITY,
+      };
       this.notes.push(note);
       this.setSelection(new Set([note]));
       this.onPreview?.(midi);
@@ -706,9 +715,12 @@ export class PianoRoll {
       if (x0 + w < sl || x0 > viewR) continue;
       const yy = y(n.midi);
       const sel = this.selection.has(n);
+      // Colour strength = velocity (like Ableton): faint notes look faint.
       c.fillStyle = sel ? col.noteSel : col.note;
+      c.globalAlpha = sel ? 1 : 0.22 + 0.78 * (velocityOf(n) / 127);
       roundRect(c, x0 + 0.5, yy - rowH / 2 + 1.5, w - 1, rowH - 3, Math.min(3, rowH / 4));
       c.fill();
+      c.globalAlpha = 1;
       c.strokeStyle = sel ? col.fg : 'rgba(0,0,0,0.35)';
       c.lineWidth = sel ? 1.5 : 1;
       c.stroke();

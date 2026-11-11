@@ -68,7 +68,10 @@ export function pickupShift(notes: Note[], o: MidiExportOptions): number {
 }
 
 /** Convert note times to ticks relative to the export grid. Exposed for tests. */
-export function noteTicks(notes: Note[], o: MidiExportOptions): { on: number; off: number; midi: number; level: number }[] {
+export function noteTicks(
+  notes: Note[],
+  o: MidiExportOptions,
+): { on: number; off: number; midi: number; level: number; velocity: number | undefined }[] {
   const beat = 60 / o.bpm;
   const q = o.quantize > 0 ? o.ppq / o.quantize : 0;
   const raw = notes.map((n) => {
@@ -78,7 +81,7 @@ export function noteTicks(notes: Note[], o: MidiExportOptions): { on: number; of
       on = Math.round(on / q) * q;
       off = Math.max(on + q, Math.round(off / q) * q);
     }
-    return { on: Math.round(on), off: Math.max(Math.round(on) + 1, Math.round(off)), midi: n.midi, level: n.level };
+    return { on: Math.round(on), off: Math.max(Math.round(on) + 1, Math.round(off)), midi: n.midi, level: n.level, velocity: n.velocity };
   });
   const shift = pickupShift(notes, o);
   // Trim overlaps between notes of the same pitch only (chords keep overlapping notes).
@@ -142,7 +145,8 @@ export function encodeMidi(notes: Note[], options: Partial<MidiExportOptions> = 
   const maxLevel = ticks.reduce((m, n) => Math.max(m, n.level), 0) || 1;
   for (const n of ticks) {
     const pitch = Math.max(0, Math.min(127, n.midi));
-    const vel = Math.max(30, Math.min(127, Math.round(50 + 70 * Math.sqrt(n.level / maxLevel))));
+    // Detected/edited velocity when present; otherwise derived from loudness.
+    const vel = Math.max(1, Math.min(127, Math.round(n.velocity ?? 50 + 70 * Math.sqrt(n.level / maxLevel))));
     events.push({ tick: n.on, order: 2, bytes: [0x90, pitch, vel] });
     events.push({ tick: n.off, order: 1, bytes: [0x80, pitch, 0] });
   }

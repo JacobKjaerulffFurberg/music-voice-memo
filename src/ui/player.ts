@@ -9,6 +9,8 @@ export interface PlayNote {
   midi: number;
   start: number;
   duration: number;
+  /** MIDI velocity 1–127 (default 100). */
+  velocity?: number;
 }
 
 export interface PlayOptions {
@@ -82,7 +84,8 @@ export class Player {
         const stopAt = t0 + (end - from);
         const hz = 440 * Math.pow(2, (n.midi - 69 + o.notesTuningCents / 100) / 12);
         const g = ctx.createGain();
-        const peak = o.notesGain;
+        // Velocity → loudness (a bit steeper than linear, like a keyboard), so faint notes stay faint.
+        const peak = o.notesGain * Math.pow((n.velocity ?? 100) / 127, 1.6);
         g.gain.setValueAtTime(0, startAt);
         g.gain.linearRampToValueAtTime(peak, startAt + 0.012);
         g.gain.linearRampToValueAtTime(peak * 0.65, startAt + 0.12);
