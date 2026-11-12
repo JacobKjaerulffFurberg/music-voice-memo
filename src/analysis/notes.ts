@@ -33,6 +33,8 @@ export interface NoteOptions {
   switchPenalty: number;
   /** Detected attacks (s). A note is split where it is re-struck (energy jumps at an onset). */
   onsets: number[];
+  /** Energy jump (after / before) an onset needs to split a note. */
+  onsetJump: number;
 }
 
 export const DEFAULT_NOTE_OPTIONS: NoteOptions = {
@@ -47,10 +49,11 @@ export const DEFAULT_NOTE_OPTIONS: NoteOptions = {
   sigmaSemitones: 0.5,
   switchPenalty: 12,
   onsets: [],
+  onsetJump: 2,
 };
 
 /** Split segments at attacks where the energy jumps (re-plucked / re-struck / re-articulated notes). */
-function splitAtOnsets(segs: Segment[], track: PitchTrack, onsets: number[], minFrames: number): Segment[] {
+function splitAtOnsets(segs: Segment[], track: PitchTrack, onsets: number[], minFrames: number, jump: number): Segment[] {
   if (onsets.length === 0) return segs;
   const { times, rms, hopSec } = track;
   const t0 = times.length ? times[0] : 0;
@@ -65,7 +68,7 @@ function splitAtOnsets(segs: Segment[], track: PitchTrack, onsets: number[], min
       for (let j = Math.max(s.a, k - 4); j < k; j++) before = Math.min(before, rms[j]);
       let after = 0;
       for (let j = k; j < Math.min(s.b, k + 8); j++) after = Math.max(after, rms[j]);
-      if (after > 1.3 * before) {
+      if (after > jump * before) {
         cuts.push(k);
         last = k;
       }
@@ -439,7 +442,7 @@ export function segmentNotes(track: PitchTrack, tuningCents: number, options: Pa
   const minFrames = Math.max(1, Math.round(o.minNoteSec / hop));
   const dipCut: Segment[] = [];
   for (const s of segments) splitOnDips(s, track.rms, Math.max(1, Math.round(minFrames / 2)), o.dipRatio, dipCut);
-  const refined = splitAtOnsets(mergeGlides(dipCut, pitch, hop, o, maxGapFrames), track, o.onsets, minFrames);
+  const refined = splitAtOnsets(mergeGlides(dipCut, pitch, hop, o, maxGapFrames), track, o.onsets, minFrames, o.onsetJump);
 
   const notes: Note[] = [];
   const offset = tuningCents / 100;

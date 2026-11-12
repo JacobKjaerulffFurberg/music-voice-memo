@@ -33,6 +33,9 @@ export const DEFAULT_YIN: YinOptions = {
   targetRate: 16000,
 };
 
+/** High-quality mode: finer time steps and full bandwidth (about 3–4× slower). */
+export const HQ_YIN: Partial<YinOptions> = { hopMs: 2.5, targetRate: 22050, windowMs: 30 };
+
 /** Integer-factor decimation with a windowed-sinc low-pass (Blackman). */
 export function decimate(
   samples: Float32Array,

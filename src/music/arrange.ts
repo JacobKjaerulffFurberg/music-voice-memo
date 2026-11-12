@@ -75,7 +75,26 @@ export function drumHits(pattern: DrumPatternId, g: GridSpec): DrumHit[] {
 
 // ---------------------------------------------------------------- chords
 
-export type Quality = 'maj' | 'min' | 'dom7' | 'min7' | 'maj7';
+export type Quality =
+  | 'maj'
+  | 'min'
+  | 'dom7'
+  | 'min7'
+  | 'maj7'
+  // Spicier colours (used by "spice up" and the chord picker).
+  | 'sus2'
+  | 'sus4'
+  | 'add9'
+  | 'madd9'
+  | 'six'
+  | 'six9'
+  | 'maj9'
+  | 'min9'
+  | 'dom9'
+  | 'min11'
+  | 'dom9sus4'
+  // Raised 5th (D F# A#): chosen when the melody sings that raised 5th.
+  | 'aug';
 
 export interface Chord {
   start: number;
@@ -88,6 +107,8 @@ export interface Chord {
   /** Voiced chord tones (MIDI), close position around middle C. */
   voicing: number[];
   bass: number;
+  /** Slot id (beats from bar 1) used to store the user's edit of this chord. */
+  slot?: string;
 }
 
 interface Degree {
@@ -119,6 +140,14 @@ const MINOR_DEGREES: Degree[] = [
 ];
 
 const ROOT_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+const SHARP_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+/** Keys written with sharps (G, D, A, E, B, F# major and their relative minors). */
+export function prefersSharps(key: { tonic: number; mode: Mode } | null): boolean {
+  if (!key) return false;
+  const major = key.mode === 'major' ? key.tonic : (key.tonic + 3) % 12;
+  return [7, 2, 9, 4, 11, 6].includes(major);
+}
 
 const INTERVALS: Record<Quality, number[]> = {
   maj: [0, 4, 7],
@@ -126,16 +155,55 @@ const INTERVALS: Record<Quality, number[]> = {
   dom7: [0, 4, 7, 10],
   min7: [0, 3, 7, 10],
   maj7: [0, 4, 7, 11],
+  sus2: [0, 2, 7],
+  sus4: [0, 5, 7],
+  add9: [0, 4, 7, 14],
+  madd9: [0, 3, 7, 14],
+  six: [0, 4, 7, 9],
+  six9: [0, 4, 9, 14],
+  // Big chords drop the 5th so the voicing stays soft and close.
+  maj9: [0, 4, 11, 14],
+  min9: [0, 3, 10, 14],
+  dom9: [0, 4, 10, 14],
+  min11: [0, 3, 10, 14, 17],
+  dom9sus4: [0, 5, 10, 14],
+  aug: [0, 4, 8],
 };
-const SUFFIX: Record<Quality, string> = { maj: '', min: 'm', dom7: '7', min7: 'm7', maj7: 'maj7' };
+const SUFFIX: Record<Quality, string> = {
+  maj: '',
+  min: 'm',
+  dom7: '7',
+  min7: 'm7',
+  maj7: 'maj7',
+  sus2: 'sus2',
+  sus4: 'sus4',
+  add9: 'add9',
+  madd9: 'm(add9)',
+  six: '6',
+  six9: '6/9',
+  maj9: 'maj9',
+  min9: 'm9',
+  dom9: '9',
+  min11: 'm11',
+  dom9sus4: '9sus4',
+  aug: '+',
+};
+
+/** Triad family of a quality (for spicing and for keeping a chord's function). */
+export function baseQuality(q: Quality): 'maj' | 'min' | 'dom' | 'sus' {
+  if (q === 'min' || q === 'min7' || q === 'madd9' || q === 'min9' || q === 'min11') return 'min';
+  if (q === 'dom7' || q === 'dom9') return 'dom';
+  if (q === 'sus2' || q === 'sus4' || q === 'dom9sus4') return 'sus';
+  return 'maj';
+}
 
 export function chordTones(root: number, quality: Quality): number[] {
   const r = ((root % 12) + 12) % 12;
   return INTERVALS[quality].map((i) => (r + i) % 12);
 }
 
-export function chordName(root: number, quality: Quality): string {
-  return `${ROOT_NAMES[((root % 12) + 12) % 12]}${SUFFIX[quality]}`;
+export function chordName(root: number, quality: Quality, sharps = false): string {
+  return `${(sharps ? SHARP_NAMES : ROOT_NAMES)[((root % 12) + 12) % 12]}${SUFFIX[quality]}`;
 }
 
 /** Turn recognised (played) chords into voiced backing chords. */
@@ -150,14 +218,18 @@ export function voicePlayedChords(played: { start: number; duration: number; roo
   return out;
 }
 
-/** Close-position voicing in [52, 70] nearest to the previous voicing (smooth voice leading). */
-export function voiceChord(root: number, quality: Quality, prev: number[] | null): number[] {
-  const tones = chordTones(root, quality);
+/**
+ * Close-position voicing in [50, 70] (big chords up to 75) nearest to the previous
+ * voicing (smooth voice leading). `lift` slides that whole window up by semitones.
+ */
+export function voiceChord(root: number, quality: Quality, prev: number[] | null, lift = 0): number[] {
+  // Keep the stacking order (9ths / 11ths above the 7th), not sorted pitch classes.
+  const tones = INTERVALS[quality].map((i) => (((root % 12) + 12) % 12) + i);
   const n = tones.length;
   const candidates: number[][] = [];
   for (let inv = 0; inv < n; inv++) {
-    const order = tones.map((_, k) => tones[(inv + k) % n]);
-    for (let base = 48; base <= 60; base += 12) {
+    const order = tones.map((_, k) => tones[(inv + k) % n] % 12);
+    for (let base = 48; base <= 72; base += 12) {
       const v: number[] = [];
       let last = -Infinity;
       for (const pc of order) {
@@ -166,10 +238,10 @@ export function voiceChord(root: number, quality: Quality, prev: number[] | null
         v.push(m);
         last = m;
       }
-      if (v[0] >= 52 && v[n - 1] <= 70) candidates.push(v);
+      if (v[0] >= 50 + lift && v[n - 1] <= (n >= 4 ? 75 : 70) + lift) candidates.push(v);
     }
   }
-  const target = prev ?? [55, 60, 64];
+  const target = prev ?? [55 + lift, 60 + lift, 64 + lift];
   const centre = (v: number[]): number => v.reduce((s, m) => s + m, 0) / v.length;
   let best = candidates[0] ?? tones.map((pc) => 60 + pc);
   let bestCost = Infinity;
@@ -252,10 +324,33 @@ function scoreChord(d: Degree, w: Float64Array, total: number, ctx: ScoreContext
   return s;
 }
 
+/**
+ * A sung note from outside the key that is the raised 5th of a major chord in
+ * the key (A# over D) is taken as meant: that augmented chord (D+) becomes a
+ * candidate, and wins when the note carries enough of the slot.
+ */
+function raisedFifths(w: Float64Array, total: number, ctx: ScoreContext): Degree[] {
+  const out: Degree[] = [];
+  if (total <= 0) return out;
+  for (let pc = 0; pc < 12; pc++) {
+    if (ctx.scale.has(pc) || w[pc] / total < 0.04) continue;
+    for (const d of ctx.degrees) {
+      if (d.quality === 'maj' && (ctx.key.tonic + d.offset + 8) % 12 === pc) {
+        out.push({ offset: d.offset, quality: 'aug', numeral: `${d.numeral}+`, prior: d.prior * 0.5 });
+      }
+    }
+    // Any other sung outside note: the borrowed chords that contain it (C over D major → C, the bVII).
+    for (const b of BORROWED[ctx.key.mode]) {
+      if (chordTones(ctx.key.tonic + b.offset, b.quality).includes(pc)) out.push({ ...b, prior: 0.1 });
+    }
+  }
+  return out;
+}
+
 function bestChord(w: Float64Array, total: number, ctx: ScoreContext): { degree: Degree; score: number } {
   let degree = ctx.degrees[0];
   let score = -Infinity;
-  for (const d of ctx.degrees) {
+  for (const d of [...ctx.degrees, ...raisedFifths(w, total, ctx)]) {
     const s = scoreChord(d, w, total, ctx);
     if (s > score) {
       score = s;
@@ -289,7 +384,11 @@ export function suggestChords(
   const chords: Chord[] = [];
   let prev: Chord | null = null;
   const holdPrev = (): Degree =>
-    prev ? (degrees.find((d) => (key.tonic + d.offset) % 12 === prev?.root && d.quality === prev.quality) ?? degrees[0]) : degrees[0];
+    prev
+      ? (degrees.find((d) => (key.tonic + d.offset) % 12 === prev?.root && d.quality === prev.quality) ??
+        degrees.find((d) => (key.tonic + d.offset) % 12 === prev?.root) ??
+        degrees[0])
+      : degrees[0];
 
   const emit = (start: number, end: number, d: Degree): void => {
     const root = (key.tonic + d.offset) % 12;
@@ -298,7 +397,7 @@ export function suggestChords(
       duration: end - start,
       root,
       quality: d.quality,
-      name: chordName(root, d.quality),
+      name: chordName(root, d.quality, prefersSharps(key)),
       numeral: d.numeral,
       voicing: voiceChord(root, d.quality, prev?.voicing ?? null),
       bass: 36 + root,
@@ -336,7 +435,7 @@ export function suggestChords(
       prev = savedPrev;
       const tw = halves[0].total + halves[1].total;
       const split = (first.score * halves[0].total + second.score * halves[1].total) / tw;
-      const differs = first.degree !== second.degree;
+      const differs = first.degree.offset !== second.degree.offset || first.degree.quality !== second.degree.quality;
       if (differs && split - one.score > 0.12) {
         emit(b, mid, first.degree);
         emit(mid, end, second.degree);
@@ -346,4 +445,224 @@ export function suggestChords(
     emit(b, end, one.degree);
   });
   return chords;
+}
+
+/**
+ * Loosen chord changes onto the singing: each change moves to the nearest sung
+ * note start within `maxShiftSec` (early entries win ties, as singers often
+ * anticipate the bar), and the neighbouring chords stretch to meet it.
+ */
+export function floatChords(chords: Chord[], notes: Note[], maxShiftSec: number): Chord[] {
+  if (chords.length < 2 || notes.length === 0) return chords;
+  const out = chords.map((c) => ({ ...c }));
+  const starts = notes.map((n) => n.start);
+  for (let i = 1; i < out.length; i++) {
+    const b = out[i].start;
+    let best = b;
+    let bestD = maxShiftSec;
+    for (const t of starts) {
+      const d = Math.abs(t - b) * (t < b ? 0.9 : 1);
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
+    }
+    const prevStart = out[i - 1].start;
+    const end = out[i].start + out[i].duration;
+    best = Math.max(prevStart + 0.25, Math.min(end - 0.25, best));
+    out[i - 1].duration = best - prevStart;
+    out[i].start = best;
+    out[i].duration = end - best;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- spice + editing
+
+export const SPICE_LEVELS = ['Plain', '7ths', 'Lush', 'Neo-soul'] as const;
+
+/** The spiced quality of a chord at a spice level, by its function in the key. */
+function spiced(root: number, q: Quality, key: { tonic: number; mode: Mode }, level: number): Quality[] {
+  if (level <= 0 || q === 'aug') return [q];
+  const fam = baseQuality(q);
+  const deg = (root - key.tonic + 12) % 12;
+  const isDominant = fam === 'dom' || (fam === 'maj' && deg === 7);
+  if (isDominant) return level === 1 ? ['dom7'] : level === 2 ? ['dom9', 'dom7'] : ['dom9sus4', 'dom9', 'dom7'];
+  if (fam === 'min') return level === 1 ? ['min7'] : level === 2 ? ['min9', 'min7'] : ['min11', 'min9', 'min7'];
+  if (fam === 'sus') return [q];
+  // Major, non-dominant: maj7 on I / IV (or III / VI / VII in minor), add9 otherwise.
+  return level === 1 ? ['maj7', 'six'] : level === 2 ? ['maj9', 'add9'] : ['maj9', 'six9', 'add9'];
+}
+
+/** Melody notes a semitone above an added tone grind against it: those colours are skipped. */
+function clashes(root: number, q: Quality, w: Float64Array, total: number): boolean {
+  if (total <= 0) return false;
+  const base = new Set(INTERVALS[baseQuality(q) === 'min' ? 'min' : 'maj'].map((i) => (root + i) % 12));
+  const r = ((root % 12) + 12) % 12;
+  // A melody note on the chord's 3rd / 5th carries the chord: colours next to it are fine.
+  const rubs = (m: number): boolean => !(base.has(m) && m !== r);
+  for (const i of INTERVALS[q]) {
+    const pc = (root + i) % 12;
+    if (base.has(pc)) continue;
+    const up = (pc + 1) % 12;
+    const down = (pc + 11) % 12;
+    if ((rubs(up) && w[up] / total > 0.12) || (rubs(down) && w[down] / total > 0.25)) return true;
+  }
+  return false;
+}
+
+/** Spice the chords up: richer qualities by function, skipping colours the melody would rub against. */
+export function spiceChords(chords: Chord[], notes: Note[], key: { tonic: number; mode: Mode }, level: number, keep: Set<number> = new Set()): Chord[] {
+  return chords.map((c, i) => {
+    if (keep.has(i)) return c;
+    const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
+    const q = spiced(c.root, c.quality, key, level).find((x) => !clashes(c.root, x, w, total)) ?? c.quality;
+    return q === c.quality ? c : { ...c, quality: q, name: chordName(c.root, q, prefersSharps(key)) };
+  });
+}
+
+export const CHROMA_LEVELS = ['In key', 'Borrowed', 'Chromatic', 'Outside'] as const;
+
+/**
+ * Break out of the key: swap chords for ones from outside it, more boldly per level.
+ *  1: a chord leading into the next one (its dominant 7th) or a borrowed chord, only where the melody fits just as well;
+ *  2: also tritone substitutes and a few darker borrowed chords, accepting some rub with the melody;
+ *  3: also chords a third away from the original, accepting a lot of rub.
+ * The first and last chords and hand-picked ones (`keep`) stay.
+ */
+export function chromaChords(chords: Chord[], notes: Note[], key: { tonic: number; mode: Mode }, level: number, keep: Set<number> = new Set()): Chord[] {
+  if (level <= 0 || chords.length < 3) return chords;
+  const degrees = key.mode === 'major' ? MAJOR_DEGREES : MINOR_DEGREES;
+  const scale = new Set((key.mode === 'major' ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10, 11]).map((x) => (key.tonic + x) % 12));
+  const ctx: ScoreContext = { key, degrees, scale, prev: null, edge: false };
+  const tol = [0, 0.05, 0.3, 0.7][Math.min(3, level)];
+  const sharps = prefersSharps(key);
+  return chords.map((c, i) => {
+    if (keep.has(i) || i === 0 || i === chords.length - 1) return c;
+    const next = chords[i + 1];
+    const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
+    const fit = (root: number, quality: Quality): number =>
+      total > 0 ? scoreChord({ offset: (root - key.tonic + 12) % 12, quality, numeral: '', prior: 0 }, w, total, ctx) : 0;
+    const pool: { root: number; quality: Quality; bonus: number }[] = [];
+    const add = (r: number, quality: Quality, bonus: number): void => {
+      const root = ((r % 12) + 12) % 12;
+      if (chordTones(root, quality).every((pc) => scale.has(pc))) return; // already in the key: not a break
+      pool.push({ root, quality, bonus });
+    };
+    if (next.root !== c.root) {
+      add(next.root + 7, 'dom7', 0.12); // leads into the next chord
+      if (level >= 2) add(next.root + 1, 'dom7', 0.1); // tritone substitute: slides down into it
+    }
+    for (const b of BORROWED[key.mode]) add(key.tonic + b.offset, b.quality, 0.04);
+    if (level >= 2) {
+      add(key.tonic + 3, 'maj', 0.02);
+      add(key.tonic + 1, 'maj7', 0.02);
+      add(key.tonic + 7, 'min', 0.02);
+    }
+    if (level >= 3) for (const d of [3, 4, 8, 9]) add(c.root + d, 'maj', 0.03);
+    let best: { root: number; quality: Quality } | null = null;
+    let bestScore = fit(c.root, c.quality) - tol;
+    for (const p of pool) {
+      const s = fit(p.root, p.quality) + p.bonus;
+      if (s > bestScore) {
+        bestScore = s;
+        best = p;
+      }
+    }
+    return best ? { ...c, root: best.root, quality: best.quality, name: chordName(best.root, best.quality, sharps), numeral: '' } : c;
+  });
+}
+
+/**
+ * Re-voice a progression for smooth voice leading (after edits / spice).
+ * `lift` (see keysLift) slides the register up; at the full lift the bass goes up an octave too.
+ */
+export function revoice(chords: Chord[], lift = 0): Chord[] {
+  let prev: number[] | null = null;
+  return chords.map((c) => {
+    const voicing = voiceChord(c.root, c.quality, prev, lift);
+    prev = voicing;
+    return { ...c, voicing, bass: 36 + c.root + (lift >= MAX_LIFT ? 12 : 0) };
+  });
+}
+
+/** A fourth: enough to clear a low voice, while 9ths and 11ths stay below ~G5. */
+const MAX_LIFT = 5;
+
+/**
+ * Semitones to slide the keys' register up so they sit just above a low voice
+ * instead of inside it. The close voicings live around middle C (50–70): the
+ * lower the voice is centred below D4, the more they rise, up to a fourth.
+ * (A full octave put the extended chords far too high.)
+ */
+export function keysLift(notes: Note[]): number {
+  if (notes.length === 0) return 0;
+  const byPitch = [...notes].sort((a, b) => a.midi - b.midi);
+  const half = byPitch.reduce((s, n) => s + n.duration, 0) / 2;
+  let acc = 0;
+  for (const n of byPitch) {
+    acc += n.duration;
+    if (acc >= half) return Math.max(0, Math.min(MAX_LIFT, 62 - n.midi));
+  }
+  return 0;
+}
+
+export interface ChordChoice {
+  root: number;
+  quality: Quality;
+  name: string;
+  /** Roman numeral, or '' for chords from outside the key. */
+  numeral: string;
+  /** How well it fits the melody in that slot (higher = better). */
+  fit: number;
+}
+
+/** Borrowed chords worth offering (they sound great over many melodies). */
+const BORROWED: Record<Mode, { offset: number; quality: Quality; numeral: string }[]> = {
+  major: [
+    { offset: 5, quality: 'min', numeral: 'iv' },
+    { offset: 10, quality: 'maj', numeral: 'bVII' },
+    { offset: 8, quality: 'maj', numeral: 'bVI' },
+    { offset: 2, quality: 'maj', numeral: 'II' },
+    { offset: 4, quality: 'maj', numeral: 'III' },
+  ],
+  minor: [
+    { offset: 5, quality: 'maj', numeral: 'IV' },
+    { offset: 2, quality: 'min', numeral: 'ii' },
+    { offset: 1, quality: 'maj', numeral: 'bII' },
+  ],
+};
+
+/** Chords that could go in [start, end), best fit to the melody first (diatonic, then borrowed). */
+export function chordChoices(notes: Note[], key: { tonic: number; mode: Mode }, start: number, end: number): ChordChoice[] {
+  const degrees = key.mode === 'major' ? MAJOR_DEGREES : MINOR_DEGREES;
+  const scale = new Set((key.mode === 'major' ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10, 11]).map((x) => (key.tonic + x) % 12));
+  const { w, total } = melodyWeights(notes, start, end);
+  const ctx: ScoreContext = { key, degrees, scale, prev: null, edge: false };
+  const seen = new Set<string>();
+  const out: ChordChoice[] = [];
+  const add = (d: Degree, bias: number): void => {
+    const root = (key.tonic + d.offset) % 12;
+    const id = `${root}:${d.quality}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    const fit = total > 0 ? scoreChord(d, w, total, ctx) + bias : d.prior;
+    out.push({ root, quality: d.quality, name: chordName(root, d.quality, prefersSharps(key)), numeral: d.numeral, fit });
+  };
+  for (const d of degrees) if (d.quality !== 'dom7') add(d, 0);
+  for (const b of BORROWED[key.mode]) add({ ...b, prior: 0.1 }, -0.15);
+  for (const d of raisedFifths(w, total, ctx)) add(d, 0.2);
+  return out.sort((a, b) => b.fit - a.fit);
+}
+
+/** Colour variants of one chord root, for the picker. */
+export function flavours(root: number, q: Quality, sharps = false): ChordChoice[] {
+  const fam = baseQuality(q);
+  const list: Quality[] =
+    fam === 'min'
+      ? ['min', 'min7', 'min9', 'min11', 'madd9', 'sus2', 'sus4']
+      : fam === 'dom'
+        ? ['maj', 'dom7', 'dom9', 'dom9sus4', 'sus4', 'sus2']
+        : ['maj', 'maj7', 'maj9', 'add9', 'six', 'six9', 'sus2', 'sus4', 'dom7', 'aug'];
+  return list.map((quality) => ({ root, quality, name: chordName(root, quality, sharps), numeral: '', fit: 0 }));
 }

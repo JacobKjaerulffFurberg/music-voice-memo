@@ -1,0 +1,609 @@
+/* Minimal phone UI: one big button, then the melody, the chords, play. */
+
+/* Always dark, flat and quiet: no glows, no gradients. */
+:root {
+  --bg: #15151b;
+  --surface: #1e1e26;
+  --surface-2: #2d2d38;
+  --sheet: #1e1e26;
+  --hair: transparent;
+  --fg: #f0eee8;
+  --muted: #8e8e9b;
+  --faint: rgba(255, 255, 255, 0.05);
+  --accent: #e8573d;
+  --keys: #a79bd6;
+  --note: #dcc8a2;
+  --line: #f1eee6;
+  color-scheme: dark;
+}
+
+[hidden] {
+  display: none !important;
+}
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  overscroll-behavior: none;
+}
+button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#app {
+  height: 100%;
+}
+
+.m {
+  height: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: max(12px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Top bar */
+.m-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  flex: none;
+}
+.m-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+.m-icon:active {
+  background: var(--faint);
+}
+.m-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.m-title {
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+
+/* Record stage */
+.m-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  justify-items: center;
+  gap: 24px;
+}
+.m-stage-top {
+  position: relative;
+  width: 100%;
+  align-self: stretch;
+}
+.m-roll {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.m-stage-bot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+/* Simple by default: "More" reveals key, tempo, chord chips and part toggles. */
+.m:not(.adv) .m-more {
+  display: none;
+}
+#m-adv[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.m-live {
+  height: 64px;
+  font-size: 56px;
+  font-weight: 300;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  opacity: 0.95;
+}
+.m-timer {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 15px;
+  height: 20px;
+}
+.m-rec {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.m-rec::before {
+  /* level halo */
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.16;
+  transform: scale(var(--lvl, 1));
+  transition: transform 80ms linear;
+}
+.m-rec::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.m-rec span {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition:
+    border-radius 180ms ease,
+    width 180ms ease,
+    height 180ms ease;
+}
+.m-rec.on span {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+.m-rec:active span {
+  transform: scale(0.96);
+}
+.m-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  min-height: 21px;
+  text-align: center;
+}
+.m-bar {
+  align-self: center;
+  width: 200px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.m-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--fg);
+}
+
+/* Result */
+.m-result {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 4px;
+}
+.m-facts {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+}
+.m-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 48px;
+  padding: 6px 4px;
+  border-radius: 12px;
+}
+.m-fact:active {
+  background: var(--faint);
+}
+.m-fact b {
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.m-fact span {
+  font-size: 14px;
+  color: var(--muted);
+}
+.m-daw {
+  margin-left: auto;
+  align-items: center;
+  padding: 6px 12px;
+  text-decoration: none;
+}
+
+/* The two dials: big, the main things to play with after Play. */
+.m-dials {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  flex: none;
+}
+.m-dial {
+  height: 68px;
+  border-radius: 22px;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  transition: background 150ms;
+}
+.m-dial:active {
+  transform: scale(0.97);
+}
+.m-dial b {
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--keys);
+}
+.m-dial:has(.m-pips .hot) {
+  background: color-mix(in srgb, var(--keys) 20%, var(--surface));
+}
+.m-dial:has(.m-peppers .hot) {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface));
+}
+.m-pips {
+  display: inline-flex;
+  gap: 7px;
+}
+.m-pips i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+.m-pips i.hot {
+  background: var(--keys);
+}
+.m-peppers {
+  display: inline-flex;
+  gap: 8px;
+}
+.m-peppers i {
+  width: 12px;
+  height: 26px;
+  border-radius: 6px 6px 12px 12px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  transform: rotate(18deg);
+}
+.m-peppers i.hot {
+  background: var(--accent);
+}
+
+.m-melody-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 180px;
+  border-radius: 24px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  overflow: hidden;
+}
+.m-melody {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.m-chords {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+  flex: none;
+}
+.m-chords::-webkit-scrollbar {
+  display: none;
+}
+.m-chord {
+  flex: none;
+  min-width: 64px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: hsl(var(--h, 265) 32% 22%);
+  color: hsl(var(--h, 265) 80% 86%);
+  border: 1px solid var(--hair);
+  font-size: 20px;
+  font-weight: 500;
+  text-align: center;
+  transition:
+    background 120ms,
+    color 120ms,
+    box-shadow 120ms;
+}
+.m-chord.now {
+  background: hsl(var(--h, 265) 70% 74%);
+  border-color: transparent;
+  color: var(--bg);
+}
+
+.m-toggles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  flex: none;
+}
+.m-toggle {
+  height: 44px;
+  border-radius: 999px;
+  font-size: 14px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--hair);
+}
+.m-toggle[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface-2);
+  border-color: transparent;
+}
+
+.m-controls {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  flex: none;
+}
+.m-side {
+  justify-self: center;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  font-size: 26px;
+}
+.m-side.rec span {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.m-side:disabled {
+  opacity: 0.4;
+}
+.m-play {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+  display: grid;
+  place-items: center;
+}
+.m-play svg {
+  width: 38px;
+  height: 38px;
+}
+.m-play:active,
+.m-side:active {
+  transform: scale(0.96);
+}
+
+/* Takes sheet */
+.m-sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 10;
+}
+.m-sheet[hidden] {
+  display: none;
+}
+.m-sheet-panel {
+  width: 100%;
+  max-width: 520px;
+  max-height: 75%;
+  overflow-y: auto;
+  background: var(--sheet);
+  border-top: 1px solid var(--hair);
+  border-radius: 26px 26px 0 0;
+  padding: 10px 8px max(16px, env(safe-area-inset-bottom));
+}
+.m-sheet-grip {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--faint);
+  margin: 4px auto 12px;
+}
+.m-take {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 14px;
+}
+.m-take.cur {
+  background: var(--surface-2);
+}
+.m-take-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+.m-take-main b {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-take-main span {
+  font-size: 13px;
+  color: var(--muted);
+}
+.m-take-del {
+  width: 40px;
+  height: 40px;
+  color: var(--muted);
+  border-radius: 20px;
+}
+.m-empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 24px;
+}
+
+.m-chord {
+  position: relative;
+  touch-action: pan-x;
+}
+.m-chord.edited::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.m-chord.bump-up {
+  animation: m-bump-up 220ms ease;
+}
+.m-chord.bump-down {
+  animation: m-bump-down 220ms ease;
+}
+@keyframes m-bump-up {
+  from {
+    transform: translateY(10px);
+    opacity: 0.4;
+  }
+}
+@keyframes m-bump-down {
+  from {
+    transform: translateY(-10px);
+    opacity: 0.4;
+  }
+}
+
+/* Picker sheets (chords, key) */
+.m-sheet-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 10px 6px;
+}
+.m-sheet-title b {
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.m-sheet-title span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.m-link {
+  margin-left: auto;
+  color: var(--keys);
+  font-size: 13px;
+  padding: 6px 4px;
+}
+.m-sub {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 12px 10px 8px;
+}
+.m-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 8px;
+}
+.m-picks.grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+}
+.m-pick {
+  min-width: 64px;
+  min-height: 48px;
+  justify-content: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.m-picks.grid .m-pick {
+  min-width: 0;
+  padding: 10px 0;
+}
+.m-pick b {
+  font-weight: 500;
+  font-size: 16px;
+}
+.m-pick span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.m-pick.flav b {
+  font-size: 14px;
+}
+.m-pick.cur {
+  background: var(--keys);
+  color: var(--bg);
+}
+.m-pick.cur span {
+  color: inherit;
+  opacity: 0.7;
+}
+.m-pick:active {
+  transform: scale(0.96);
+}

@@ -115,6 +115,8 @@ export interface AnalysisResult {
     essentiaError: string | null;
   };
   timingsMs: Record<string, number>;
+  /** 'high' when made by the slower high-quality pass. */
+  quality?: 'normal' | 'high';
 }
 
 /**

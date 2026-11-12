@@ -4,8 +4,8 @@
  */
 
 import { essentiaKey, essentiaPitch, essentiaRhythm, loadEssentia, type EssentiaApi } from './essentia';
-import { analyze, type ExternalInputs } from './pipeline';
-import { trackPitchYin } from './pitch';
+import { analyze, analyzeHighQuality, type ExternalInputs } from './pipeline';
+import { HQ_YIN, trackPitchYin } from './pitch';
 import { estimateTuning } from './tuning';
 import type { AnalysisResult, EnginePreference, InputSource, KeyResult, PitchTrack } from './types';
 
@@ -16,6 +16,8 @@ export interface AnalyzeRequest {
   sampleRate: number;
   engine: EnginePreference;
   source: InputSource;
+  /** 'high' = slower, more careful pass. */
+  quality: 'normal' | 'high';
 }
 
 export type WorkerResponse =
@@ -62,7 +64,7 @@ async function run(req: AnalyzeRequest): Promise<void> {
       essentiaError = `pitch: ${errMsg(e)}`;
     }
   }
-  pitch ??= trackPitchYin(samples, sampleRate);
+  pitch ??= trackPitchYin(samples, sampleRate, req.quality === 'high' ? HQ_YIN : {});
 
   const ext: ExternalInputs = { pitch, essentiaError, essentiaVersion: es ? es.version : null };
   if (es) {
@@ -82,8 +84,11 @@ async function run(req: AnalyzeRequest): Promise<void> {
     }
   }
 
-  progress('Notes, chords, key, tempo…');
-  const result = analyze(samples, sampleRate, ext, { source: req.source });
+  progress(req.quality === 'high' ? 'High quality: comparing note readings…' : 'Notes, chords, key, tempo…');
+  const result =
+    req.quality === 'high'
+      ? analyzeHighQuality(samples, sampleRate, ext, { source: req.source })
+      : analyze(samples, sampleRate, ext, { source: req.source });
   post({ type: 'result', id, result });
 }
 

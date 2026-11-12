@@ -1,12 +1,14 @@
 /**
  * One-screen, DAW-style UI: header (record + transport), takes sidebar,
  * always-on clip editor in the middle, compact control strip at the bottom.
- * Space = play/stop, always. The page itself never scrolls.
+ * Space = play from the start marker / stop (back to the marker), Shift+Space =
+ * continue from where it stopped, L = loop, T = tap tempo. The page never scrolls.
  */
 
 import { analyzeInWorker } from '../analysis/client';
 import { DEFAULT_INTENT, type IntentOptions } from '../analysis/intent';
 import { keyName, noteName } from '../analysis/music';
+import { fitGridAtBpm, onsetsFromNotes } from '../analysis/tempo';
 import { velocityOf } from '../analysis/velocity';
 import { liveGuess, newLiveState } from '../analysis/live';
 import { synthInstrument, synthMelody, TEST_MELODIES, type InstrumentEvent } from '../analysis/synth';
@@ -16,8 +18,9 @@ import { encodeMidi } from '../export/midi';
 import { buildSummary, buildTextSummary } from '../export/summary';
 import { decodeWav, encodeWav } from '../export/wav';
 import { effectiveAnalysis, effectiveSettings, intentOf, isChordsTake, newId, type Overrides, type Settings, type StoredRecording } from '../model';
-import { drumHits, suggestChords, voicePlayedChords, type Chord, type DrumHit, type DrumPatternId } from '../music/arrange';
+import { drumHits, type Chord, type DrumHit, type DrumPatternId } from '../music/arrange';
 import { deleteRecording, listRecordings, loadRecording, saveRecording, type RecordingMeta } from '../storage/db';
+import { takeChords } from '../music/progression';
 import { PianoRoll } from './piano-roll';
 import { Player, type PlayNote } from './player';
 
@@ -78,6 +81,7 @@ const TEMPLATE = (debug: boolean): string => `
       <span id="pos" class="pos">0:00.0</span>
       <label class="chip"><input type="checkbox" id="voice" checked><span>Voice</span></label>
       <label class="chip"><input type="checkbox" id="notes-chk" checked><span>Notes</span></label>
+      <label class="chip" title="Loop the region in the loop strip above the ruler (L). Draw one there, or press L to loop the selection / 4 bars."><input type="checkbox" id="loop-chk"><span>⟳ Loop</span></label>
       <label class="chip"><input type="checkbox" id="click"><span>Click</span></label>
       <label class="chip" title="Backing drums on/off (style in the Backing row)"><input type="checkbox" id="drums-on" checked><span>Drums</span></label>
       <label class="chip" title="Hear your mic live — use headphones to avoid feedback"><input type="checkbox" id="monitor"><span>🎧 Monitor</span></label>
@@ -88,7 +92,7 @@ const TEMPLATE = (debug: boolean): string => `
       <span id="now-next" class="now-next"></span>
     </div>
     <div id="status" class="status">Press ● and sing an idea</div>
-    ${debug ? '<a class="nav" href="./">App</a>' : '<a class="nav" href="./debug.html">Debug</a>'}
+    <a class="nav" href="./mobile.html" title="Simple phone view">Phone</a>${debug ? '<a class="nav" href="./">App</a>' : '<a class="nav" href="./debug.html">Debug</a>'}
   </header>
 
   <div class="body">
@@ -136,16 +140,17 @@ const TEMPLATE = (debug: boolean): string => `
             <option value="melody">Melody</option>
             <option value="chords">Chords</option>
           </select>
-          <label class="stat edit" id="st-bpm"><span class="label">Tempo BPM</span>
+          <label class="stat edit" id="st-bpm"><span class="label scrub" id="bpm-scrub" title="Drag up/down to change the tempo (Shift = fine)">Tempo BPM ⇕</span>
             <input id="in-bpm" class="stat-input" type="number" step="0.1" min="30" max="300" inputmode="decimal"></label>
           <label class="stat edit" id="st-key"><span class="label">Key</span>
             <select id="key-select" class="stat-select" aria-label="Key"></select></label>
           <label class="stat edit" id="st-tune"><span class="label">Tuning ¢</span>
             <input id="in-tune" class="stat-input" type="number" step="1" min="-50" max="50" inputmode="numeric"></label>
           <div class="stat edit" id="st-beat"><span class="label">Bar 1 at ms</span>
-            <span class="stat-row"><input id="in-beat" class="stat-input" type="number" step="5" inputmode="numeric" aria-label="First beat (ms)">
-            <button id="beat-here" class="mini" title="Put bar 1 at the playhead">⌖</button></span></div>
+            <span class="stat-row"><input id="in-beat" class="stat-input" type="number" step="10" inputmode="numeric" aria-label="Bar 1 (ms)">
+            <button id="beat-here" class="mini" title="Put bar 1 at the start marker">⌖</button></span></div>
           <button id="reanalyze" class="ghost small" title="Run detection again">Re-analyze</button>
+          <button id="enhance" class="small" title="Enhance: slower, more careful analysis (finer pitch tracking, compares several note readings). Fewer fake split notes on echoey or wobbly takes.">✦ Enhance</button>
         </div>
 
         <div class="toolbar">
@@ -166,8 +171,10 @@ const TEMPLATE = (debug: boolean): string => `
         <div id="help-text" class="help" hidden>
           <b>Edit:</b> click note = select (Shift adds) · drag = move · drag edges = resize · Ctrl-drag = copy ·
           double-click empty = add · double-click note = delete · drag empty = box select · Alt = no snap ·
-          ruler = set playhead · keys on the left = audition.
-          <b>Keys:</b> Space play/stop · Del · ↑↓ semitone (Shift octave) · ←→ move (Shift length) ·
+          keys on the left = audition.
+          <b>Timeline:</b> LOOP strip: drag = loop, double-click = on/off · BAR ruler / empty click = start marker ·
+          GRID lane: drag bar 1 = slide grid, drag any other bar onto its real spot = fix tempo (snaps to notes, Alt = free).
+          <b>Keys:</b> Space play from marker / stop · Shift+Space continue · L loop · T tap · Del · ↑↓ semitone (Shift octave) · ←→ move (Shift length) ·
           Ctrl+A/C/V/D/U/Z · Esc.
         </div>
 
@@ -186,13 +193,15 @@ const TEMPLATE = (debug: boolean): string => `
 
           <fieldset class="group">
             <legend>Tempo &amp; key</legend>
-            <button id="tap" class="small" title="Tap the beat">Tap</button>
-            <button data-bpm="-1" class="small">−1</button><button data-bpm="1" class="small">+1</button>
-            <button id="half" class="small">½×</button><button id="double" class="small">2×</button>
-            <button data-beat="-1" class="small" title="Move bar 1 one beat earlier">◂beat</button>
-            <button data-beat="1" class="small" title="Move bar 1 one beat later">beat▸</button>
-            <button data-grid="-20" class="small" title="Nudge grid −20 ms">◂</button>
-            <button data-grid="20" class="small" title="Nudge grid +20 ms">▸</button>
+            <button id="tap" class="small" title="Tap the beat (or press T). While playing, start tapping on a 1: the grid lines up with your taps too.">Tap (T)</button>
+            <button data-bpm="-1" class="small" title="Tempo −1 (Shift: −0.1)">−</button><button data-bpm="1" class="small" title="Tempo +1 (Shift: +0.1)">+</button>
+            <button id="half" class="small" title="Half tempo">½×</button><button id="double" class="small" title="Double tempo">2×</button>
+            <span class="sep"></span>
+            <button data-beat="-1" class="small" title="Bar 1 one beat earlier">◂ beat</button>
+            <button data-beat="1" class="small" title="Bar 1 one beat later">beat ▸</button>
+            <button data-grid="-10" class="small" title="Slide the grid 10 ms earlier (Shift: 1 ms)">◂</button>
+            <button data-grid="10" class="small" title="Slide the grid 10 ms later (Shift: 1 ms)">▸</button>
+            <button id="auto-grid" class="small" title="Line the grid up with the notes again at this tempo">Auto-align</button>
             <button id="reset" class="ghost small" title="Back to detected tempo, bar 1, key and tuning">Reset</button>
           </fieldset>
 
@@ -206,6 +215,7 @@ const TEMPLATE = (debug: boolean): string => `
               <option value="ballad">Ballad</option>
             </select>
             <label class="check"><input type="checkbox" id="chords-chk" checked> Chords</label>
+            <label class="check" title="Soft Rhodes-style keys, gently strummed, changes follow your singing. Off = synth pad + bass exactly on the beat."><input type="checkbox" id="floaty" checked> Floaty keys</label>
             <select id="chords-rate" class="small" aria-label="Chord rate">
               <option value="auto">Auto</option><option value="1">1 / bar</option><option value="2">2 / bar</option>
             </select>
@@ -259,6 +269,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   const interpNote = $<HTMLSpanElement>('interp-note');
   const drumsSel = $<HTMLSelectElement>('drums');
   const chordsChk = $<HTMLInputElement>('chords-chk');
+  const floatyChk = $<HTMLInputElement>('floaty');
   const chordsRate = $<HTMLSelectElement>('chords-rate');
   const chordListEl = $<HTMLSpanElement>('chord-list');
   const exBacking = $<HTMLInputElement>('ex-backing');
@@ -275,6 +286,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   const inTune = $<HTMLInputElement>('in-tune');
   const inBeat = $<HTMLInputElement>('in-beat');
   const monitorChk = $<HTMLInputElement>('monitor');
+  const loopChk = $<HTMLInputElement>('loop-chk');
   const nowLabel = $<HTMLSpanElement>('now-label');
   const nowChord = $<HTMLSpanElement>('now-chord');
   const nowNext = $<HTMLSpanElement>('now-next');
@@ -293,6 +305,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       if (typeof p.rate === 'string') chordsRate.value = p.rate;
       if (typeof p.click === 'boolean') clickChk.checked = p.click;
       if (typeof p.drumsOn === 'boolean') drumsOn.checked = p.drumsOn;
+      if (typeof p.floaty === 'boolean') floatyChk.checked = p.floaty;
     }
   } catch {
     /* storage unavailable */
@@ -307,6 +320,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
           chords: chordsChk.checked,
           rate: chordsRate.value,
           click: clickChk.checked,
+          floaty: floatyChk.checked,
         }),
       );
     } catch {
@@ -319,15 +333,25 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   const player = new Player();
 
   let current: StoredRecording | null = null;
+  /** Start marker: Space plays from here and stopping returns here (Ableton-style). */
+  let cue = 0;
   let busy = false;
   let engine: EnginePreference = 'auto';
   /** Previous / next editedNotes states (undefined = the interpreted detection). */
   const undoStack: (Note[] | undefined)[] = [];
   const redoStack: (Note[] | undefined)[] = [];
 
+  let statusText = '';
   const setStatus = (t: string): void => {
+    statusText = t;
     statusEl.textContent = t;
     statusEl.title = t;
+    statusEl.classList.remove('hint');
+  };
+  /** Temporary help text for what's under the pointer ('' = back to the status). */
+  const showHint = (t: string): void => {
+    statusEl.textContent = t || statusText;
+    statusEl.classList.toggle('hint', !!t);
   };
 
   function drumPattern(): DrumPatternId {
@@ -349,14 +373,8 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     if (!current) return { drums: [], chords: [] };
     const grid = { bpm: s.bpm, firstBeatSec: s.firstBeatMs / 1000, beatsPerBar: 4, durationSec: current.samples.length / current.sampleRate };
     const rate = chordsRate.value === '1' ? 1 : chordsRate.value === '2' ? 2 : 'auto';
-    const eff = effectiveAnalysis(current);
-    // Chords takes: back them with what was actually played. Melodies: suggest chords.
-    const chords =
-      isChordsTake(eff) && eff?.playedChords?.length
-        ? voicePlayedChords(eff.playedChords)
-        : s.key && eff
-          ? suggestChords(eff.notes, s.key, grid, { chordsPerBar: rate })
-          : [];
+    // Played chords, or chords suggested for the melody, with any picks / spice from the phone page.
+    const chords = takeChords(current, s, { chordsPerBar: rate, floaty: floatyChk.checked });
     return { drums: drumHits(drumPattern(), grid), chords };
   }
 
@@ -450,6 +468,8 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   async function ingest(samples: Float32Array, sampleRate: number, name: string): Promise<void> {
     const rec: StoredRecording = { id: newId(), name, createdAt: Date.now(), sampleRate, samples, analysis: null, overrides: {} };
     current = rec;
+    cue = 0;
+    roll.setCue(0);
     undoStack.length = 0;
     redoStack.length = 0;
     keySelect.dataset.for = '';
@@ -458,7 +478,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     void refreshList();
   }
 
-  async function analyzeCurrent(): Promise<void> {
+  async function analyzeCurrent(quality: 'normal' | 'high' = 'normal'): Promise<void> {
     const rec = current;
     if (!rec) return;
     busy = true;
@@ -466,7 +486,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     const t0 = performance.now();
     try {
       setStatus('Analyzing…');
-      const result = await analyzeInWorker(rec.samples, rec.sampleRate, engine, (stage) => setStatus(stage), rec.source ?? 'auto');
+      const result = await analyzeInWorker(rec.samples, rec.sampleRate, engine, (stage) => setStatus(stage), rec.source ?? 'auto', quality);
       rec.analysis = result;
       keySelect.dataset.for = '';
       await saveRecording(rec, false).catch((e: unknown) => console.warn('save failed', e));
@@ -478,7 +498,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
           : `melody: ${result.notes.length} notes`;
       const poly = result.input?.polyphony != null ? ` · polyphony ${result.input.polyphony.toFixed(1)}` : '';
       setStatus(
-        `Analyzed ${fmtTime(result.durationSec)} in ${ms} ms (${eng}) — ${what}${poly}` +
+        `${result.quality === 'high' ? '✦ Enhanced: ' : ''}Analyzed ${fmtTime(result.durationSec)} in ${ms} ms (${eng}) — ${what}${poly}` +
           (result.engine.essentiaError ? ` · essentia: ${result.engine.essentiaError}` : ''),
       );
     } catch (e) {
@@ -537,14 +557,14 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       box.title = title;
     };
     const cands = a?.tempo.candidates.map((c) => `${c.source === 'note-ioi' ? 'notes' : c.source === 'essentia-rhythm2013' ? 'essentia' : 'attacks'} ${c.bpm.toFixed(1)} (${pct(c.confidence)})`).join(' · ') ?? '';
-    field(inBpm, s.bpm.toFixed(1), s.overridden.bpm, `${s.overridden.bpm ? 'Set by you' : `Detected, ${pct(s.bpmConfidence)} sure`} · ${cands}. Type a tempo; ½× / 2× and Tap are below.`);
+    field(inBpm, s.bpm.toFixed(1), s.overridden.bpm, `${s.overridden.bpm ? 'Set by you' : `Detected, ${pct(s.bpmConfidence)} sure`} · ${cands}. Type, scroll, ↑/↓ (Shift = 0.1), drag the label, tap (T), or drag a bar number in the GRID lane onto where that bar really is.`);
     field(
       inTune,
       a ? s.tuningCents.toFixed(0) : '',
       s.overridden.tuning,
       a ? `A4 = ${s.a4Hz.toFixed(2)} Hz${s.overridden.tuning ? ' (set by you — notes re-read at this tuning)' : ` (detected from ${a.tuning.source ?? 'frames'})`}` : '',
     );
-    field(inBeat, String(Math.round(s.firstBeatMs)), s.overridden.firstBeat, 'Where bar 1 beat 1 is, in ms from the start. ⌖ puts it at the playhead.');
+    field(inBeat, String(Math.round(s.firstBeatMs)), s.overridden.firstBeat, `Where bar 1 beat 1 is, in ms from the start${s.overridden.firstBeat ? ' (set by you)' : ''}. Easiest: drag the orange "1" flag in the GRID lane. ⌖ puts it at the start marker.`);
     const audioKey = a?.key.fromAudio;
     const keyBox = keySelect.closest('.stat') as HTMLElement;
     keyBox.classList.toggle('manual', s.overridden.key);
@@ -585,8 +605,10 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     roll.setChords(chordsChk.checked ? arr.chords : []);
     chordListEl.textContent = arr.chords.length ? `${chordsTake ? 'played: ' : ''}${arr.chords.map((c) => c.name).join(' ')}` : '';
     chordListEl.title = arr.chords.map((c) => `${c.name} (${c.numeral})`).join(' · ');
+    roll.setOnsets((rec.analysis?.notes ?? []).map((n) => n.start));
+    renderLoop();
     roll.setData(a, s, dur);
-    roll.setPlayhead(player.playing || player.position > 0 ? player.position : null);
+    roll.setPlayhead(player.playing ? player.position : cue, false);
 
     if (opts.debug) {
       const dbg = root.querySelector<HTMLPreElement>('#debug-json');
@@ -613,23 +635,63 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
   }
 
   // ---------- overrides (tempo / grid / key) ----------
-  function override(mut: (o: Overrides, s: Settings) => void): void {
+  function override(mut: (o: Overrides, s: Settings) => void, restart = true): void {
     const s = settings();
     if (!current || !s) return;
     mut(current.overrides, s);
     if (current.overrides.bpm !== undefined) current.overrides.bpm = Math.max(30, Math.min(300, current.overrides.bpm));
-    changed();
+    if (restart) changed();
+    else {
+      // Live tweaks (scrub, tap while playing): redraw + save, but don't restart the audio.
+      render();
+      saveSoon();
+    }
   }
+
+  /** Detected (un-quantized) note starts: what the grid lines up with. */
+  const detectedOnsets = (): ReturnType<typeof onsetsFromNotes> => onsetsFromNotes(current?.analysis?.notes ?? []);
+
+  /**
+   * New tempo. Bar 1 placed by hand stays put (the grid stretches around it);
+   * otherwise the grid is re-fitted to the notes at the new tempo.
+   */
+  function setBpm(o: Overrides, bpm: number): void {
+    o.bpm = Math.max(30, Math.min(300, bpm));
+    if (o.firstBeatMs === undefined || o.firstBeatAuto) {
+      const fb = fitGridAtBpm(detectedOnsets(), o.bpm);
+      if (fb !== null) {
+        o.firstBeatMs = Math.round(fb * 1000);
+        o.firstBeatAuto = true;
+      }
+    }
+  }
+  /** Bar 1 placed by hand. */
+  function setBar1(o: Overrides, ms: number): void {
+    o.firstBeatMs = ms;
+    delete o.firstBeatAuto;
+  }
+
   root.querySelectorAll<HTMLButtonElement>('[data-bpm]').forEach((b) =>
-    b.addEventListener('click', () => override((o, s) => (o.bpm = Math.round((s.bpm + Number(b.dataset.bpm)) * 100) / 100))),
+    b.addEventListener('click', (e) =>
+      override((o, s) => setBpm(o, Math.round((s.bpm + Number(b.dataset.bpm) * (e.shiftKey ? 0.1 : 1)) * 10) / 10)),
+    ),
   );
-  $<HTMLButtonElement>('half').addEventListener('click', () => override((o, s) => (o.bpm = s.bpm / 2)));
-  $<HTMLButtonElement>('double').addEventListener('click', () => override((o, s) => (o.bpm = s.bpm * 2)));
+  $<HTMLButtonElement>('half').addEventListener('click', () => override((o, s) => setBpm(o, s.bpm / 2)));
+  $<HTMLButtonElement>('double').addEventListener('click', () => override((o, s) => setBpm(o, s.bpm * 2)));
   root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach((b) =>
-    b.addEventListener('click', () => override((o, s) => (o.firstBeatMs = s.firstBeatMs + Number(b.dataset.grid)))),
+    b.addEventListener('click', (e) =>
+      override((o, s) => setBar1(o, s.firstBeatMs + Number(b.dataset.grid) * (e.shiftKey ? 0.1 : 1))),
+    ),
   );
   root.querySelectorAll<HTMLButtonElement>('[data-beat]').forEach((b) =>
-    b.addEventListener('click', () => override((o, s) => (o.firstBeatMs = s.firstBeatMs + (Number(b.dataset.beat) * 60000) / s.bpm))),
+    b.addEventListener('click', () => override((o, s) => setBar1(o, s.firstBeatMs + (Number(b.dataset.beat) * 60000) / s.bpm))),
+  );
+  $<HTMLButtonElement>('auto-grid').addEventListener('click', () =>
+    override((o, s) => {
+      delete o.firstBeatMs;
+      delete o.firstBeatAuto;
+      if (o.bpm !== undefined) setBpm(o, s.bpm);
+    }),
   );
   keySelect.addEventListener('change', () =>
     override((o) => {
@@ -647,6 +709,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     override((o) => {
       delete o.bpm;
       delete o.firstBeatMs;
+      delete o.firstBeatAuto;
       delete o.keyTonic;
       delete o.keyMode;
       delete o.tuningCents;
@@ -671,28 +734,109 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       }
     });
   };
-  numberField(inBpm, (v, o) => (o.bpm = v));
-  numberField(inBeat, (v, o) => (o.firstBeatMs = v));
-  numberField(inTune, (v, o) => (o.tuningCents = Math.max(-50, Math.min(50, v))));
-  $<HTMLButtonElement>('beat-here').addEventListener('click', () =>
-    override((o) => (o.firstBeatMs = Math.round(player.position * 1000))),
+  numberField(inBpm, (v, o) => setBpm(o, v));
+  numberField(inBeat, (v, o) => setBar1(o, v));
+  // BPM field: Up/Down = +-1, Shift = +-0.1 (instead of the browser's tiny steps); wheel too.
+  const bumpBpm = (d: number): void => override((o, s) => setBpm(o, Math.round((s.bpm + d) * 10) / 10));
+  inBpm.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    bumpBpm((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 0.1 : 1));
+  });
+  inBpm.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      bumpBpm((e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.1 : 1));
+    },
+    { passive: false },
   );
-  const taps: number[] = [];
-  $<HTMLButtonElement>('tap').addEventListener('pointerdown', () => {
-    const t = performance.now();
-    if (taps.length && t - taps[taps.length - 1] > 2000) taps.length = 0;
-    taps.push(t);
-    if (taps.length > 8) taps.shift();
-    if (taps.length >= 2) {
-      const span = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
-      override((o) => (o.bpm = Math.round((60000 / span) * 10) / 10));
+  // Drag the "Tempo BPM" label up/down to scrub the tempo (Ableton-style).
+  const bpmScrub = $<HTMLSpanElement>('bpm-scrub');
+  bpmScrub.addEventListener('pointerdown', (e) => {
+    const s0 = settings();
+    if (!s0) return;
+    e.preventDefault();
+    bpmScrub.setPointerCapture(e.pointerId);
+    const y0 = e.clientY;
+    let last = s0.bpm;
+    const move = (ev: PointerEvent): void => {
+      const per = ev.shiftKey ? 0.1 : 0.5;
+      const bpm = Math.round((s0.bpm + ((y0 - ev.clientY) / 4) * per) * 10) / 10;
+      if (bpm === last) return;
+      last = bpm;
+      override((o) => setBpm(o, bpm), false);
+    };
+    const up = (): void => {
+      bpmScrub.removeEventListener('pointermove', move);
+      bpmScrub.removeEventListener('pointerup', up);
+      bpmScrub.removeEventListener('pointercancel', up);
+      if (last !== s0.bpm) changed();
+    };
+    bpmScrub.addEventListener('pointermove', move);
+    bpmScrub.addEventListener('pointerup', up);
+    bpmScrub.addEventListener('pointercancel', up);
+  });
+  numberField(inTune, (v, o) => (o.tuningCents = Math.max(-50, Math.min(50, v))));
+  $<HTMLButtonElement>('beat-here').addEventListener('click', () => override((o) => setBar1(o, Math.round(cue * 1000))));
+
+  // Tap tempo (button or T). While playing, taps are also beat positions:
+  // the first tap of a run is a "1", so the grid lines up with the taps.
+  const taps: { wall: number; audio: number | null }[] = [];
+  function tap(): void {
+    if (!current) return;
+    const wall = performance.now();
+    if (taps.length && wall - taps[taps.length - 1].wall > 2000) taps.length = 0;
+    taps.push({ wall, audio: player.playing ? player.position - player.latency : null });
+    if (taps.length > 16) taps.shift();
+    if (taps.length < 2) {
+      setStatus(player.playing ? 'Tap... start on a 1 and keep tapping the beat' : 'Tap...');
+      return;
     }
+    const n = taps.length;
+    const P = (taps[n - 1].wall - taps[0].wall) / (n - 1) / 1000;
+    const bpm = Math.round((60 / P) * 10) / 10;
+    const audio = taps.map((t) => t.audio);
+    override((o) => {
+      if (n >= 4 && audio.every((a) => a !== null)) {
+        // Least-squares line through the tapped beats: tempo + where beat "1" is.
+        const ys = audio as number[];
+        const mx = (n - 1) / 2;
+        const my = ys.reduce((a, b) => a + b, 0) / n;
+        let sxy = 0;
+        let sxx = 0;
+        ys.forEach((y, i) => {
+          sxy += (i - mx) * (y - my);
+          sxx += (i - mx) ** 2;
+        });
+        const p = sxy / sxx;
+        const one = my - p * mx; // time of the first tap, on the fitted line
+        o.bpm = Math.max(30, Math.min(300, Math.round((60 / p) * 10) / 10));
+        // Bar 1 = the bar line (in the tapped bar phase) at or just before the first note.
+        const firstNote = current?.analysis?.notes[0]?.start ?? one;
+        const bar = (4 * 60) / o.bpm;
+        setBar1(o, Math.round((one + Math.floor((firstNote + 0.15 - one) / bar) * bar) * 1000));
+      } else setBpm(o, bpm);
+    }, !player.playing);
+    setStatus('Tap: ' + bpm.toFixed(1) + ' BPM' + (player.playing && n < 4 ? ' - keep tapping to line up the grid' : ''));
+  }
+  $<HTMLButtonElement>('tap').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    tap();
   });
 
   nameInput.addEventListener('input', () => {
     if (!current) return;
     current.name = nameInput.value;
     saveSoon();
+  });
+  $<HTMLButtonElement>('enhance').addEventListener('click', () => {
+    if (!current || busy) return;
+    if (current.editedNotes && !confirm('Enhancing re-analyzes the take and replaces your edited notes. Continue?')) return;
+    delete current.editedNotes;
+    undoStack.length = 0;
+    redoStack.length = 0;
+    void analyzeCurrent('high');
   });
   $<HTMLButtonElement>('reanalyze').addEventListener('click', () => {
     if (current?.editedNotes && !confirm('Re-analyzing replaces your edited notes with freshly detected ones. Continue?')) return;
@@ -863,6 +1007,8 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       drums: arr.drums,
       chords: chordsChk.checked ? arr.chords : [],
       backingTuningCents: voiceChk.checked ? s.tuningCents : 0,
+      chordStyle: floatyChk.checked ? 'floaty' : 'tight',
+      loop: current.loop?.on ? { start: current.loop.start, end: current.loop.end } : null,
     });
     playBtn.textContent = '■';
     playBtn.classList.add('playing');
@@ -876,42 +1022,108 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     playBtn.classList.remove('playing');
   }
 
-  function togglePlay(): void {
+  /** Playhead (and time readout) parked at the start marker. */
+  function parkAtCue(): void {
+    player.seek(cue);
+    roll.setPlayhead(cue);
+    posEl.textContent = fmtTime(cue);
+  }
+
+  /**
+   * Ableton-style: play starts at the start marker; stop jumps back to it.
+   * `resume` (Shift+Space) continues from where playback last stopped.
+   */
+  function togglePlay(resume = false): void {
     if (recorder.isRecording) {
       void toggleRecord();
       return;
     }
-    if (player.playing) stopPlayback();
-    else if (current) void startPlayback(player.position);
+    if (player.playing) {
+      stopPlayback();
+      if (!resume) parkAtCue();
+    } else if (current) void startPlayback(resume ? player.position : cue);
   }
+
+  function setCue(sec: number): void {
+    cue = Math.max(0, sec);
+    roll.setCue(cue);
+    if (player.playing) void startPlayback(cue);
+    else parkAtCue();
+  }
+
+  // ---------- loop ----------
+  function renderLoop(): void {
+    loopChk.checked = !!current?.loop?.on;
+    roll.setLoop(current?.loop ? { start: current.loop.start, end: current.loop.end } : null, !!current?.loop?.on);
+  }
+  /** Loop on/off. Turning it on without a loop region loops the selected notes' bars, or 4 bars from the marker. */
+  function toggleLoop(): void {
+    const s = settings();
+    if (!current || !s) return;
+    const on = !current.loop?.on;
+    if (on && !current.loop) {
+      const bar = (4 * 60) / s.bpm;
+      const first = s.firstBeatMs / 1000;
+      const dur = current.samples.length / current.sampleRate;
+      const sel = roll.selectionSpan();
+      const a = sel ? sel.start : cue;
+      let start = first + Math.floor((a - first + 1e-3) / bar) * bar;
+      let end = sel ? first + Math.ceil((sel.end - first - 1e-3) / bar) * bar : start + 4 * bar;
+      start = Math.max(0, start);
+      end = Math.min(dur, Math.max(end, start + bar));
+      current.loop = { start, end, on };
+    } else if (current.loop) current.loop.on = on;
+    renderLoop();
+    saveSoon();
+    if (player.playing) void startPlayback(player.position);
+    setStatus(on ? 'Loop on - drag in the LOOP strip to change it (L toggles)' : 'Loop off');
+  }
+  loopChk.addEventListener('change', () => {
+    if (!!current?.loop?.on !== loopChk.checked) toggleLoop();
+  });
+  roll.onLoopChange = (loop, on, final) => {
+    if (!current) return;
+    current.loop = loop ? { start: loop.start, end: loop.end, on } : undefined;
+    loopChk.checked = on;
+    if (!final) return;
+    saveSoon();
+    if (player.playing) void startPlayback(player.position);
+  };
+
+  // ---------- grid dragged in the roll ----------
+  roll.onGridChange = (bpm, firstBeatMs, final) => {
+    if (!current) return;
+    const s = settings();
+    const o = current.overrides;
+    if (s && Math.abs(bpm - s.bpm) > 1e-6) o.bpm = Math.round(bpm * 100) / 100;
+    o.firstBeatMs = Math.round(firstBeatMs * 10) / 10;
+    delete o.firstBeatAuto;
+    if (final) {
+      changed();
+      setStatus(`Grid: ${(o.bpm ?? s?.bpm ?? 0).toFixed(1)} BPM, bar 1 at ${fmtTime((o.firstBeatMs ?? 0) / 1000)}`);
+    } else render();
+  };
+  roll.onHint = showHint;
 
   player.onEnded = () => {
     playBtn.textContent = '▶';
     playBtn.classList.remove('playing');
-    roll.setPlayhead(null);
-    posEl.textContent = fmtTime(0);
+    parkAtCue();
   };
-  playBtn.addEventListener('click', togglePlay);
+  playBtn.addEventListener('click', (e) => togglePlay(e.shiftKey));
   for (const el of [clickChk, voiceChk, notesChk]) {
     el.addEventListener('change', () => {
       savePrefs();
       if (player.playing) void startPlayback(player.position);
     });
   }
-  for (const el of [drumsSel, drumsOn, chordsChk, chordsRate]) {
+  for (const el of [drumsSel, drumsOn, chordsChk, chordsRate, floatyChk]) {
     el.addEventListener('change', () => {
       savePrefs();
       changed();
     });
   }
-  roll.onSeek = (sec) => {
-    if (player.playing) void startPlayback(sec);
-    else {
-      player.seek(sec);
-      roll.setPlayhead(sec);
-      posEl.textContent = fmtTime(sec);
-    }
-  };
+  roll.onSeek = (sec) => setCue(sec);
 
   // ---------- keyboard: Space always plays/stops, never scrolls ----------
   const isTextField = (t: EventTarget | null): boolean =>
@@ -926,10 +1138,26 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       if (e.code === 'Space' || e.key === ' ') {
         e.preventDefault();
         e.stopPropagation();
-        if (!e.repeat) togglePlay();
+        if (!e.repeat) togglePlay(e.shiftKey);
         return;
       }
       const mod = e.ctrlKey || e.metaKey;
+      const plain = !mod && !e.altKey && !(e.target instanceof HTMLSelectElement);
+      if (plain && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        if (!e.repeat) toggleLoop();
+        return;
+      }
+      if (plain && e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        if (!e.repeat) tap();
+        return;
+      }
+      if (plain && e.key === 'Home') {
+        e.preventDefault();
+        setCue(0);
+        return;
+      }
       if (!mod && !e.altKey && e.key.toLowerCase() === 'r' && !(e.target instanceof HTMLSelectElement)) {
         e.preventDefault();
         if (!e.repeat) void toggleRecord();
@@ -1082,6 +1310,8 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       return;
     }
     current = rec;
+    cue = 0;
+    roll.setCue(0);
     undoStack.length = 0;
     redoStack.length = 0;
     keySelect.dataset.for = '';

@@ -10,6 +10,7 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         debug: fileURLToPath(new URL('./debug.html', import.meta.url)),
+        mobile: fileURLToPath(new URL('./mobile.html', import.meta.url)),
       },
     },
   },

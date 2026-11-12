@@ -7,10 +7,13 @@ import { estimateKeyFromNotes } from './analysis/key';
 import { requantize } from './analysis/notes';
 import { assignVelocities } from './analysis/velocity';
 import type { AnalysisResult, InputSource, Mode, Note } from './analysis/types';
+import type { Quality } from './music/arrange';
 
 export interface Overrides {
   bpm?: number;
   firstBeatMs?: number;
+  /** firstBeatMs was fitted automatically after a tempo change (not placed by hand): re-fit on the next one. */
+  firstBeatAuto?: boolean;
   keyTonic?: number;
   keyMode?: Mode;
   /** Manual tuning offset (cents vs A440). Re-reads which semitone each detected note is. */
@@ -31,6 +34,14 @@ export interface StoredRecording {
   intent?: IntentOptions;
   /** What the take is: auto-detected, or forced to melody / chords. */
   source?: InputSource;
+  /** Chords picked by hand, by slot (beats from bar 1). */
+  chordEdits?: Record<string, { root: number; quality: Quality }>;
+  /** How spicy the chords are: 0 plain … 3 neo-soul. */
+  spice?: number;
+  /** How far the chords leave the key: 0 in key … 3 outside. */
+  chroma?: number;
+  /** Loop region (seconds) and whether looping is on. */
+  loop?: { start: number; end: number; on: boolean };
 }
 
 export function intentOf(rec: { intent?: IntentOptions }): IntentOptions {
@@ -140,7 +151,7 @@ export function effectiveSettings(a: AnalysisResult | null, o: Overrides): Setti
     a4Hz: 440 * Math.pow(2, (o.tuningCents ?? a?.tuning.cents ?? 0) / 1200),
     overridden: {
       bpm: o.bpm !== undefined,
-      firstBeat: o.firstBeatMs !== undefined,
+      firstBeat: o.firstBeatMs !== undefined && !o.firstBeatAuto,
       tuning: o.tuningCents !== undefined,
       key: o.keyTonic !== undefined,
     },

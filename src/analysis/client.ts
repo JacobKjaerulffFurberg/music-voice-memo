@@ -41,6 +41,7 @@ export function analyzeInWorker(
   engine: EnginePreference = 'auto',
   onProgress?: (stage: string) => void,
   source: InputSource = 'auto',
+  quality: 'normal' | 'high' = 'normal',
 ): Promise<AnalysisResult> {
   const id = nextId++;
   const w = getWorker();
@@ -48,7 +49,7 @@ export function analyzeInWorker(
     pending.set(id, { resolve, reject, onProgress });
     // Copy so the caller keeps its buffer (needed for playback / storage).
     const copy = samples.slice();
-    const req: AnalyzeRequest = { type: 'analyze', id, samples: copy, sampleRate, engine, source };
+    const req: AnalyzeRequest = { type: 'analyze', id, samples: copy, sampleRate, engine, source, quality };
     w.postMessage(req, [copy.buffer]);
   });
 }

@@ -13,11 +13,11 @@
 
 import { detectChords, refineKeyWithChords } from './chords';
 import { estimateKeyFromFrames, estimateKeyFromNotes } from './key';
-import { requantize, segmentNotes } from './notes';
-import { trackPitchYin } from './pitch';
+import { requantize, segmentNotes, type NoteOptions } from './notes';
+import { HQ_YIN, trackPitchYin } from './pitch';
 import { analyzePolyFrames, trackPolyNotes, type PolyFrames } from './poly';
 import { detectOnsets } from './spectrum';
-import { chooseTempo, tempoFromBeatTicks, tempoFromNotes, tempoFromOnsets } from './tempo';
+import { chooseTempo, gridScore, onsetsFromNotes, tempoFromBeatTicks, tempoFromOnsets, type Onset } from './tempo';
 import { estimateTuning, tuningFromNotes } from './tuning';
 import { assignVelocities } from './velocity';
 import type { AnalysisResult, InputSource, KeyResult, Note, PitchTrack, TempoResult, TuningResult } from './types';
@@ -38,6 +38,10 @@ export interface ExternalInputs {
 
 export interface AnalyzeOptions {
   source: InputSource;
+  /** 'high': finer, slower pitch tracking (see HQ_YIN). */
+  quality?: 'normal' | 'high';
+  /** Extra note-segmentation options (used by the high-quality pass). */
+  notes?: Partial<NoteOptions>;
 }
 
 /** Above this average number of simultaneous pitches, a take may be chords… */
@@ -79,7 +83,7 @@ export function analyze(
   const requested = options.source ?? 'auto';
   const onsets = detectOnsets(samples, sampleRate);
   lap('onsets');
-  const pitch = ext.pitch ?? trackPitchYin(samples, sampleRate);
+  const pitch = ext.pitch ?? trackPitchYin(samples, sampleRate, options.quality === 'high' ? HQ_YIN : {});
   lap('pitch');
   let poly: PolyFrames | null = null;
   if (requested !== 'melody') {
@@ -108,10 +112,10 @@ export function analyze(
     // (robust to scoops and vibrato), then segment again at that tuning.
     const onsetTimes = onsets.filter((o) => o.strength >= 0.2).map((o) => o.time);
     const frameTuning = estimateTuning(pitch);
-    const firstPass = requantize(segmentNotes(pitch, frameTuning.cents, { onsets: onsetTimes }), frameTuning.cents, 0);
+    const firstPass = requantize(segmentNotes(pitch, frameTuning.cents, { onsets: onsetTimes, ...options.notes }), frameTuning.cents, 0);
     tuning = firstPass.length >= 3 ? tuningFromNotes(firstPass) : frameTuning;
     lap('tuning');
-    notes = segmentNotes(pitch, tuning.cents, { onsets: onsetTimes });
+    notes = segmentNotes(pitch, tuning.cents, { onsets: onsetTimes, ...options.notes });
     lap('notes');
   }
   notes = assignVelocities(notes);
@@ -122,18 +126,17 @@ export function analyze(
   lap('key');
 
   const candidates: TempoResult[] = [];
-  if (source === 'melody') {
-    const noteTempo = tempoFromNotes(notes);
-    if (noteTempo) candidates.push(noteTempo);
-  } else {
-    const onsetTempo = tempoFromOnsets(onsets.map((o) => ({ time: o.time, weight: Math.sqrt(o.strength) })));
-    if (onsetTempo) candidates.push(onsetTempo);
-  }
+  const tempoOnsets: Onset[] =
+    source === 'melody'
+      ? onsetsFromNotes(notes)
+      : onsets.map((o) => ({ time: o.time, weight: Math.sqrt(o.strength), accent: o.strength }));
+  const ownTempo = tempoFromOnsets(tempoOnsets);
+  if (ownTempo) candidates.push(ownTempo);
   if (ext.rhythm) {
-    const r = tempoFromBeatTicks(ext.rhythm.bpm, ext.rhythm.ticks, ext.rhythm.confidence, notes[0]?.start ?? null);
+    const r = tempoFromBeatTicks(ext.rhythm.bpm, ext.rhythm.ticks, ext.rhythm.confidence, tempoOnsets);
     if (r) candidates.push(r);
   }
-  const chosenTempo = chooseTempo(candidates);
+  const chosenTempo = chooseTempo(candidates, tempoOnsets);
   lap('tempo');
 
   let playedChords: AnalysisResult['playedChords'];
@@ -174,4 +177,51 @@ export function analyze(
     },
     timingsMs: timings,
   };
+}
+
+/** Note-detection settings tried by the high-quality pass, loose → strict. */
+const HQ_VARIANTS: Partial<NoteOptions>[] = [{}, { dipRatio: 0.35, onsetJump: 3 }, { dipRatio: 0.25, onsetJump: 4 }];
+
+/**
+ * How believable a set of notes is: notes that sit on a steady beat grid
+ * (at the take's own tempo) score high; fragments from echo / vibrato wobble
+ * land between grid lines and very short notes cost extra.
+ */
+export function notePlausibility(r: AnalysisResult): number {
+  const t = r.tempo.chosen;
+  if (!t || r.notes.length < 4) return 0;
+  const onsets = onsetsFromNotes(r.notes);
+  const fit = gridScore(onsets, 60 / t.bpm, t.firstBeatMs / 1000);
+  const beat = 60 / t.bpm;
+  const tiny = r.notes.filter((n) => n.duration < 0.3 * beat).length / r.notes.length;
+  return fit - 0.5 * tiny;
+}
+
+/**
+ * High-quality analysis (slower): finer pitch tracking, then note detection
+ * run loose → strict, keeping the result whose notes are most plausible.
+ * Chords takes and very short takes fall back to one pass.
+ */
+export function analyzeHighQuality(
+  samples: Float32Array,
+  sampleRate: number,
+  ext: ExternalInputs = {},
+  options: Partial<AnalyzeOptions> = {},
+): AnalysisResult {
+  const t0 = now();
+  const pitch = ext.pitch ?? trackPitchYin(samples, sampleRate, HQ_YIN);
+  const withPitch = { ...ext, pitch };
+  let best: AnalysisResult | null = null;
+  let bestScore = -Infinity;
+  for (const v of HQ_VARIANTS) {
+    const r = analyze(samples, sampleRate, withPitch, { ...options, notes: { ...options.notes, ...v } });
+    if (r.input?.source === 'chords') return { ...r, quality: 'high' };
+    const s = notePlausibility(r) + (best ? 0 : 0.01); // ties go to the loosest
+    if (s > bestScore) {
+      bestScore = s;
+      best = r;
+    }
+  }
+  const out = best as AnalysisResult;
+  return { ...out, quality: 'high', timingsMs: { ...out.timingsMs, total: Math.round(now() - t0) } };
 }

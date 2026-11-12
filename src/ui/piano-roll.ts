@@ -10,7 +10,10 @@
  *   double-click empty    add note (last used length)       double-click note: delete
  *   drag empty            marquee select (touch: pan)
  *   Alt while dragging    bypass grid snap
- *   ruler                 click/drag to set the playhead
+ *   loop strip (top)      drag = draw loop · drag loop = move · drag its edges = resize · double-click = on/off
+ *   ruler                 click = start marker (Space plays from here), drag = scrub
+ *   grid lane             drag bar 1 / empty = slide the grid · drag bar N = stretch tempo (bar 1 pinned)
+ *   click empty space     start marker
  *   key gutter            audition a pitch
  *   Ctrl/⌘ + wheel        zoom around the pointer
  *
@@ -25,8 +28,17 @@ import { DEFAULT_VELOCITY, velocityOf } from '../analysis/velocity';
 import { beatTimes, type Settings } from '../model';
 import type { Chord } from '../music/arrange';
 
+/** Loop strip (drag = draw / move / resize the loop, double-click = loop on/off). */
+const LOOP_H = 11;
+/** Bar ruler (click = start marker, drag = scrub). */
+const RULER_Y = LOOP_H;
 const RULER = 18;
+/** Grid lane: drag bar 1 (or empty space) to slide the grid, drag another bar to stretch the tempo. */
+const GRID_Y = RULER_Y + RULER;
+const GRID_H = 15;
+const HEAD = GRID_Y + GRID_H;
 const CHORD_LANE = 18;
+const SNAP_PX = 9;
 const GUTTER = 38;
 const ROW_MIN_PX = 10;
 const EDGE_PX = 7;
@@ -48,10 +60,32 @@ interface Geometry {
   pps: number;
 }
 
-type DragKind = 'move' | 'resize-r' | 'resize-l' | 'marquee' | 'scrub' | 'pan';
+type DragKind =
+  | 'move'
+  | 'resize-r'
+  | 'resize-l'
+  | 'marquee'
+  | 'scrub'
+  | 'pan'
+  | 'loop-new'
+  | 'loop-move'
+  | 'loop-l'
+  | 'loop-r'
+  | 'grid-move'
+  | 'grid-stretch';
+
+export interface LoopRegion {
+  start: number;
+  end: number;
+}
 
 interface Drag {
   kind: DragKind;
+  /** Pointer time at drag start. */
+  t0?: number;
+  loop0?: LoopRegion | null;
+  /** Grid at drag start, and the beat line (index from bar 1) being dragged. */
+  grid0?: { bpm: number; first: number; line: number; lineTime: number };
   x0: number;
   y0: number;
   anchor: Note | null;
@@ -85,10 +119,25 @@ export class PianoRoll {
   private lockedRange: [number, number] | null = null;
   private lastDown = { t: 0, x: 0, y: 0 };
   private lastLen = 0.25;
+  private lastHint = '';
+
+  /** Detected note starts in the audio (what the grid snaps to). */
+  private onsets: number[] = [];
+  /** Start marker: where Space starts playback (Ableton-style). */
+  private cue = 0;
+  private loop: LoopRegion | null = null;
+  private loopOn = false;
 
   /** Subdivisions per beat for snapping (0 = off). */
   grid = 4;
+  /** Start marker set (ruler click / click in empty space). */
   onSeek: ((sec: number) => void) | null = null;
+  /** Loop region drawn / moved / toggled. `final` is false while dragging. */
+  onLoopChange: ((loop: LoopRegion | null, on: boolean, final: boolean) => void) | null = null;
+  /** Grid moved or stretched by dragging in the grid lane. `final` is false while dragging. */
+  onGridChange: ((bpm: number, firstBeatMs: number, final: boolean) => void) | null = null;
+  /** Short help for whatever is under the pointer. */
+  onHint: ((text: string) => void) | null = null;
   /** Fired after every finished edit with the full (sorted) note list. */
   onNotesChange: ((notes: Note[]) => void) | null = null;
   onSelect: ((selected: Note[]) => void) | null = null;
@@ -110,7 +159,12 @@ export class PianoRoll {
     this.canvas.addEventListener('pointerup', (e) => this.pointerUp(e));
     this.canvas.addEventListener('pointercancel', (e) => this.pointerUp(e));
     this.canvas.addEventListener('pointerleave', () => {
-      if (!this.drag) this.canvas.style.cursor = 'default';
+      if (this.drag) return;
+      this.canvas.style.cursor = 'default';
+      if (this.lastHint) {
+        this.lastHint = '';
+        this.onHint?.('');
+      }
     });
     this.canvas.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -137,9 +191,34 @@ export class PianoRoll {
     this.chords = chords;
   }
 
-  setPlayhead(sec: number | null): void {
+  /** Onsets the grid handles snap to (the detected, un-quantized note starts). */
+  setOnsets(times: number[]): void {
+    this.onsets = times;
+  }
+
+  setCue(sec: number): void {
+    this.cue = Math.max(0, sec);
+    this.draw();
+  }
+
+  setLoop(loop: LoopRegion | null, on: boolean): void {
+    if (this.drag?.kind.startsWith('loop')) return;
+    this.loop = loop;
+    this.loopOn = on && !!loop;
+    this.draw();
+  }
+
+  /** Bars covering the selected notes (for "loop selection"). */
+  selectionSpan(): LoopRegion | null {
+    const sel = this.selected;
+    if (sel.length === 0) return null;
+    return { start: Math.min(...sel.map((n) => n.start)), end: Math.max(...sel.map((n) => n.start + n.duration)) };
+  }
+
+  /** `follow` scrolls the view to keep the playhead visible (playback); off for redraws while editing. */
+  setPlayhead(sec: number | null, follow = true): void {
     this.playhead = sec;
-    if (sec !== null && !this.drag) {
+    if (follow && sec !== null && !this.drag) {
       const x = GUTTER + sec * this.pxPerSec();
       const view = this.scroller.clientWidth;
       if (x < this.scroller.scrollLeft + GUTTER || x > this.scroller.scrollLeft + view - 20) {
@@ -278,6 +357,52 @@ export class PianoRoll {
     return first + Math.round((t - first) / unit) * unit;
   }
 
+  /** Snap to whole beats (or bars when zoomed far out). */
+  private snapBeat(t: number, g: Geometry): number {
+    const s = this.settings;
+    if (!s) return t;
+    const P = 60 / s.bpm;
+    const step = P * g.pps < 12 ? 4 * P : P;
+    const first = s.firstBeatMs / 1000;
+    return first + Math.round((t - first) / step) * step;
+  }
+
+  /** Magnet: the nearest note start within a few pixels, else t itself. */
+  private snapOnset(t: number, g: Geometry): number {
+    let best = t;
+    let bestD = SNAP_PX / g.pps;
+    for (const o of this.onsets) {
+      const d = Math.abs(o - t);
+      if (d < bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  /** The bar line (beat index from bar 1, multiple of 4) under x in the grid lane, if any. */
+  private barHandleAt(x: number, g: Geometry): { index: number; time: number } | null {
+    const s = this.settings;
+    if (!s) return null;
+    let best: { index: number; time: number } | null = null;
+    let bestD = 8;
+    for (const b of beatTimes(s.bpm, s.firstBeatMs, this.duration)) {
+      if (((b.index % 4) + 4) % 4 !== 0) continue;
+      const d = Math.abs(this.xOf(b.time, g) - x);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  private emitLoop(final: boolean): void {
+    this.onLoopChange?.(this.loop, this.loopOn, final);
+    this.draw();
+  }
+
   // ------------------------------------------------------------ selection / commit
 
   private setSelection(sel: Set<Note>): void {
@@ -345,10 +470,51 @@ export class PianoRoll {
     const dbl = now - this.lastDown.t < DBL_MS && Math.abs(x - this.lastDown.x) < 6 && Math.abs(y - this.lastDown.y) < 6;
     this.lastDown = { t: dbl ? 0 : now, x, y };
 
-    // Ruler: scrub the playhead.
-    if (y < RULER) {
-      this.onSeek?.(Math.max(0, this.tAt(x, g)));
+    const t = this.tAt(x, g);
+    // Loop strip: draw a new loop, or move / resize / toggle the existing one.
+    if (y < RULER_Y) {
+      const L = this.loop;
+      const inside = L && t >= L.start && t <= L.end;
+      if (dbl && inside) {
+        this.loopOn = !this.loopOn;
+        this.emitLoop(true);
+        return;
+      }
+      let kind: DragKind = 'loop-new';
+      if (L) {
+        const xs = this.xOf(L.start, g);
+        const xe = this.xOf(L.end, g);
+        if (Math.abs(x - xs) < 6) kind = 'loop-l';
+        else if (Math.abs(x - xe) < 6) kind = 'loop-r';
+        else if (inside) kind = 'loop-move';
+      }
+      this.startDrag(kind, e, x, y, null);
+      if (this.drag) {
+        this.drag.t0 = kind === 'loop-new' ? (e.altKey ? t : this.snapBeat(t, g)) : t;
+        this.drag.loop0 = L ? { ...L } : null;
+      }
+      return;
+    }
+    // Ruler: set the start marker (snapped to the grid; Alt = free), drag to scrub.
+    if (y < GRID_Y) {
+      this.onSeek?.(Math.max(0, e.altKey ? t : this.snapTime(t)));
       this.startDrag('scrub', e, x, y, null);
+      return;
+    }
+    // Grid lane: drag bar 1 / empty space to slide the grid, another bar to stretch the tempo.
+    if (y < HEAD) {
+      const s = this.settings;
+      if (!s) return;
+      const P = 60 / s.bpm;
+      const first = s.firstBeatMs / 1000;
+      const h = this.barHandleAt(x, g);
+      const stretch = h !== null && h.index !== 0;
+      const line = h ? h.index : Math.round((t - first) / P);
+      this.startDrag(stretch ? 'grid-stretch' : 'grid-move', e, x, y, null);
+      if (this.drag) {
+        this.drag.t0 = t;
+        this.drag.grid0 = { bpm: s.bpm, first, line, lineTime: first + line * P };
+      }
       return;
     }
     if (y < g.top) return; // chord lane
@@ -424,17 +590,86 @@ export class PianoRoll {
     const { x, y } = this.localPoint(e);
     const d = this.drag;
     if (!d) {
-      if (y < RULER) this.canvas.style.cursor = 'text';
-      else if (x < this.scroller.scrollLeft + GUTTER) this.canvas.style.cursor = 'pointer';
+      const t = this.tAt(x, g);
+      let cursor = 'default';
+      let hint = '';
+      if (y < RULER_Y) {
+        const L = this.loop;
+        const nearEdge = L && (Math.abs(x - this.xOf(L.start, g)) < 6 || Math.abs(x - this.xOf(L.end, g)) < 6);
+        cursor = nearEdge ? 'ew-resize' : L && t > L.start && t < L.end ? 'grab' : 'crosshair';
+        hint = 'Loop: drag to draw a loop · drag it to move, its edges to resize · double-click = loop on/off (L)';
+      } else if (y < GRID_Y) {
+        cursor = 'pointer';
+        hint = 'Click to set where playback starts (Space) · Alt = no snap';
+      } else if (y < HEAD) {
+        const h = this.barHandleAt(x, g);
+        cursor = 'ew-resize';
+        hint =
+          h && h.index !== 0
+            ? `Drag bar ${Math.floor(h.index / 4) + 1} onto where it really is: stretches the tempo, bar 1 stays put · Alt = no snap`
+            : 'Drag to slide the whole beat grid (snaps to notes) · drag another bar number to fix the tempo · Alt = no snap';
+      } else if (x < this.scroller.scrollLeft + GUTTER) cursor = 'pointer';
       else {
         const h = this.hit(x, y, g);
-        this.canvas.style.cursor = h ? (h.zone === 'body' ? 'grab' : 'ew-resize') : 'default';
+        cursor = h ? (h.zone === 'body' ? 'grab' : 'ew-resize') : 'default';
+      }
+      this.canvas.style.cursor = cursor;
+      if (hint !== this.lastHint) {
+        this.lastHint = hint;
+        this.onHint?.(hint);
       }
       return;
     }
 
     if (d.kind === 'scrub') {
-      this.onSeek?.(Math.max(0, this.tAt(x, g)));
+      const t = this.tAt(x, g);
+      this.onSeek?.(Math.max(0, e.altKey ? t : this.snapTime(t)));
+      return;
+    }
+    if (d.kind.startsWith('loop')) {
+      const t = this.tAt(x, g);
+      const snap = (v: number): number => Math.max(0, Math.min(this.duration, e.altKey ? v : this.snapBeat(v, g)));
+      const L0 = d.loop0;
+      if (d.kind === 'loop-new' && d.t0 !== undefined) {
+        const a = d.t0;
+        const b = snap(t);
+        if (b !== a) {
+          this.loop = { start: Math.min(a, b), end: Math.max(a, b) };
+          this.loopOn = true;
+        }
+      } else if (L0 && d.t0 !== undefined) {
+        if (d.kind === 'loop-move') {
+          const len = L0.end - L0.start;
+          const start = Math.max(0, Math.min(this.duration - len, snap(L0.start + t - d.t0)));
+          this.loop = { start, end: start + len };
+        } else if (d.kind === 'loop-l') {
+          this.loop = { start: Math.min(snap(t), L0.end - 0.05), end: L0.end };
+        } else {
+          this.loop = { start: L0.start, end: Math.max(snap(t), L0.start + 0.05) };
+        }
+      }
+      d.changed = true;
+      this.canvas.style.cursor = d.kind === 'loop-move' ? 'grabbing' : 'ew-resize';
+      this.emitLoop(false);
+      return;
+    }
+    if ((d.kind === 'grid-move' || d.kind === 'grid-stretch') && d.grid0 && d.t0 !== undefined && this.settings) {
+      const g0 = d.grid0;
+      const P0 = 60 / g0.bpm;
+      const raw = g0.lineTime + (this.tAt(x, g) - d.t0);
+      const target = e.altKey ? raw : this.snapOnset(raw, g);
+      let bpm = g0.bpm;
+      let first = g0.first;
+      if (d.kind === 'grid-move') {
+        first = target - g0.line * P0;
+      } else {
+        const P = (target - g0.first) / g0.line;
+        if (P > 60 / 300 && P < 60 / 30) bpm = 60 / P;
+      }
+      d.changed = true;
+      this.settings = { ...this.settings, bpm, firstBeatMs: first * 1000 };
+      this.onGridChange?.(bpm, first * 1000, false);
+      this.draw();
       return;
     }
     if (d.kind === 'pan') {
@@ -513,7 +748,23 @@ export class PianoRoll {
     this.lockedRange = null;
     this.marquee = null;
     if (d.kind === 'marquee') {
+      const { x, y } = this.localPoint(e);
+      // A plain click in empty space sets the start marker (like Ableton's insert marker).
+      if (Math.abs(x - d.x0) < 4 && Math.abs(y - d.y0) < 4) {
+        const t = this.tAt(x, this.geometry());
+        this.onSeek?.(Math.max(0, e.altKey ? t : this.snapTime(t)));
+      }
       this.setSelection(this.selection);
+      return;
+    }
+    if (d.kind.startsWith('loop')) {
+      if (d.changed) this.emitLoop(true);
+      return;
+    }
+    if (d.kind === 'grid-move' || d.kind === 'grid-stretch') {
+      const s = this.settings;
+      if (d.changed && s) this.onGridChange?.(s.bpm, s.firstBeatMs, true);
+      this.draw();
       return;
     }
     if (d.changed) {
@@ -591,7 +842,7 @@ export class PianoRoll {
     const H = this.canvas.height / dpr;
     const [lo, hi] = this.pitchRange();
     const lane = this.chords.length ? CHORD_LANE : 0;
-    const top = RULER + lane;
+    const top = HEAD + lane;
     const rowH = Math.max(ROW_MIN_PX, (H - top) / (hi - lo + 1));
     return { lo, hi, rowH, top, lane, H, pps: this.pxPerSec() };
   }
@@ -690,18 +941,36 @@ export class PianoRoll {
     // Raw f0 (tuning-corrected) behind the notes — melody takes only.
     const a = this.analysis;
     if (a && a.input?.source !== 'chords') {
+      // A continuous line, broken at silences and at jumps (new note / octave slip).
       const tune = a.tuning.cents / 100;
-      c.fillStyle = col.f0;
       const tr = a.pitch;
+      c.strokeStyle = col.f0;
+      c.lineWidth = 1.6;
+      c.lineJoin = 'round';
+      c.lineCap = 'round';
+      let px = NaN;
+      let py = NaN;
+      let pm = NaN;
       for (let i = 0; i < tr.f0Hz.length; i++) {
         const f = tr.f0Hz[i];
-        if (f <= 0) continue;
         const x = X(tr.times[i]);
-        if (x < sl || x > viewR) continue;
-        const m = hzToMidi(f) - tune;
-        if (m < lo - 1 || m > hi + 1) continue;
-        c.globalAlpha = 0.15 + 0.4 * tr.confidence[i];
-        c.fillRect(x - 0.75, y(m) - 0.75, 1.5, 1.5);
+        const m = f > 0 ? hzToMidi(f) - tune : NaN;
+        const visible = f > 0 && x >= sl - 4 && x <= viewR + 4 && m >= lo - 1 && m <= hi + 1;
+        if (!visible) {
+          px = NaN;
+          continue;
+        }
+        const yy = y(m);
+        if (!Number.isNaN(px) && Math.abs(m - pm) < 1.5 && x - px < 12) {
+          c.globalAlpha = 0.25 + 0.55 * tr.confidence[i];
+          c.beginPath();
+          c.moveTo(px, py);
+          c.lineTo(x, yy);
+          c.stroke();
+        }
+        px = x;
+        py = yy;
+        pm = m;
       }
       c.globalAlpha = 1;
     }
@@ -739,9 +1008,31 @@ export class PianoRoll {
       c.strokeRect(Math.min(m.x0, m.x1) + 0.5, Math.min(m.y0, m.y1) + 0.5, Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
     }
 
-    // Ruler.
+    // Loop region tint over the notes.
+    const L = this.loop;
+    if (L) {
+      c.fillStyle = this.loopOn ? 'rgba(255,176,46,0.07)' : 'rgba(255,255,255,0.03)';
+      c.fillRect(X(L.start), top, (L.end - L.start) * g.pps, H - top);
+    }
+
+    // Loop strip.
+    c.fillStyle = col.bg;
+    c.fillRect(sl, 0, viewR - sl, LOOP_H);
+    if (L) {
+      const x0 = X(L.start);
+      const w = Math.max(2, (L.end - L.start) * g.pps);
+      c.fillStyle = this.loopOn ? col.first : col.bar;
+      c.globalAlpha = this.loopOn ? 0.9 : 0.6;
+      c.fillRect(x0, 1, w, LOOP_H - 2);
+      c.globalAlpha = 1;
+      c.fillStyle = this.loopOn ? '#1a1a1a' : col.fg;
+      c.fillRect(x0, 1, 2, LOOP_H - 2);
+      c.fillRect(x0 + w - 2, 1, 2, LOOP_H - 2);
+    }
+
+    // Ruler (bar numbers).
     c.fillStyle = col.ruler;
-    c.fillRect(sl, 0, viewR - sl, RULER);
+    c.fillRect(sl, RULER_Y, viewR - sl, RULER);
     if (s) {
       c.fillStyle = col.text;
       c.font = '10px system-ui, sans-serif';
@@ -750,25 +1041,78 @@ export class PianoRoll {
         const x = Math.round(X(b.time)) + 0.5;
         if (x < sl - 30 || x > viewR) continue;
         const bar = ((b.index % 4) + 4) % 4 === 0;
-        c.fillRect(x, bar ? 4 : 11, 1, bar ? RULER - 4 : RULER - 11);
-        if (bar) c.fillText(String(Math.floor(b.index / 4) + 1), x + 3, RULER / 2);
+        c.fillRect(x, RULER_Y + (bar ? 3 : 11), 1, bar ? RULER - 3 : RULER - 11);
+        if (bar) c.fillText(String(Math.floor(b.index / 4) + 1), x + 3, RULER_Y + RULER / 2);
+      }
+    }
+
+    // Grid lane: bar handles. Bar 1 is the orange flag you slide; the others stretch the tempo.
+    c.fillStyle = col.bg;
+    c.fillRect(sl, GRID_Y, viewR - sl, GRID_H);
+    c.fillStyle = col.bar;
+    c.fillRect(sl, HEAD - 1, viewR - sl, 1);
+    if (s) {
+      c.font = '600 9px system-ui, sans-serif';
+      c.textBaseline = 'middle';
+      const dragging = this.drag?.kind === 'grid-move' || this.drag?.kind === 'grid-stretch';
+      const grabbed = dragging ? this.drag?.grid0?.line : undefined;
+      for (const b of beatTimes(s.bpm, s.firstBeatMs, this.duration)) {
+        if (((b.index % 4) + 4) % 4 !== 0) continue;
+        const x = Math.round(X(b.time)) + 0.5;
+        if (x < sl - 30 || x > viewR + 2) continue;
+        const one = b.index === 0;
+        const label = String(Math.floor(b.index / 4) + 1);
+        const w = Math.max(14, c.measureText(label).width + 8);
+        c.fillStyle = one ? col.first : b.index === grabbed ? col.fg : col.bar;
+        c.beginPath();
+        c.moveTo(x, GRID_Y + 1);
+        c.lineTo(x + w, GRID_Y + 1);
+        c.lineTo(x + w, HEAD - 5);
+        c.lineTo(x + 4, HEAD - 5);
+        c.lineTo(x, HEAD - 1);
+        c.closePath();
+        c.fill();
+        c.fillStyle = one ? '#1a1a1a' : b.index === grabbed ? col.bg : '#fff';
+        c.fillText(label, x + 4, GRID_Y + (GRID_H - 4) / 2 + 1);
       }
     }
 
     // Chord lane.
     if (lane) {
       c.fillStyle = col.bg;
-      c.fillRect(sl, RULER, viewR - sl, lane);
+      c.fillRect(sl, HEAD, viewR - sl, lane);
       c.font = '600 11px system-ui, sans-serif';
       for (const ch of this.chords) {
         const x0 = X(ch.start);
         const w = ch.duration * g.pps;
         if (x0 + w < sl || x0 > viewR) continue;
         c.fillStyle = col.row;
-        c.fillRect(x0 + 1, RULER + 2, Math.max(1, w - 2), lane - 4);
+        c.fillRect(x0 + 1, HEAD + 2, Math.max(1, w - 2), lane - 4);
         c.fillStyle = col.first;
-        c.fillText(ch.name, x0 + 4, RULER + lane / 2, Math.max(8, w - 6));
+        c.fillText(ch.name, x0 + 4, HEAD + lane / 2, Math.max(8, w - 6));
       }
+    }
+
+    // Start marker (where Space starts): blue flag in the ruler + faint line.
+    {
+      const x = Math.round(X(this.cue)) + 0.5;
+      c.strokeStyle = col.f0;
+      c.globalAlpha = 0.35;
+      c.lineWidth = 1;
+      c.setLineDash([3, 3]);
+      c.beginPath();
+      c.moveTo(x, HEAD);
+      c.lineTo(x, H);
+      c.stroke();
+      c.setLineDash([]);
+      c.globalAlpha = 1;
+      c.fillStyle = col.f0;
+      c.beginPath();
+      c.moveTo(x - 5, RULER_Y + RULER - 8);
+      c.lineTo(x + 5, RULER_Y + RULER - 8);
+      c.lineTo(x, RULER_Y + RULER);
+      c.closePath();
+      c.fill();
     }
 
     // Playhead.
@@ -777,14 +1121,14 @@ export class PianoRoll {
       c.strokeStyle = col.fg;
       c.lineWidth = 1.5;
       c.beginPath();
-      c.moveTo(x, 0);
+      c.moveTo(x, RULER_Y);
       c.lineTo(x, H);
       c.stroke();
       c.fillStyle = col.fg;
       c.beginPath();
-      c.moveTo(x - 5, 0);
-      c.lineTo(x + 5, 0);
-      c.lineTo(x, 7);
+      c.moveTo(x - 5, RULER_Y);
+      c.lineTo(x + 5, RULER_Y);
+      c.lineTo(x, RULER_Y + 7);
       c.closePath();
       c.fill();
     }
@@ -792,6 +1136,12 @@ export class PianoRoll {
     // Sticky piano-key gutter.
     c.fillStyle = col.ruler;
     c.fillRect(sl, 0, GUTTER, top);
+    c.fillStyle = col.text;
+    c.font = '8px system-ui, sans-serif';
+    c.textBaseline = 'middle';
+    c.fillText(this.loopOn ? 'LOOP ●' : 'LOOP', sl + 3, LOOP_H / 2 + 0.5);
+    c.fillText('BAR', sl + 3, RULER_Y + RULER / 2);
+    c.fillText('GRID ⇔', sl + 3, GRID_Y + GRID_H / 2);
     for (let m = lo; m <= hi; m++) {
       const pc = ((m % 12) + 12) % 12;
       const yy = y(m);
