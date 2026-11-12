@@ -40,6 +40,12 @@ export interface StoredRecording {
   spice?: number;
   /** How far the chords leave the key: 0 in key … 3 outside. */
   chroma?: number;
+  /** Phone page: lo-fi drums on, with the recording slid and stretched onto their grid. */
+  drums?: boolean;
+  /** Phone page: chords play along (default on; false = off). */
+  keys?: boolean;
+  /** Phone page: rain ambience. */
+  rain?: boolean;
   /** Loop region (seconds) and whether looping is on. */
   loop?: { start: number; end: number; on: boolean };
 }

@@ -15,6 +15,7 @@ import type { Note } from '../analysis/types';
 import { micPermissionGranted, Recorder } from '../audio/recorder';
 import { effectiveAnalysis, effectiveSettings, newId, type Settings, type StoredRecording } from '../model';
 import { chordChoices, CHROMA_LEVELS, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
+import { alignToGrid, lofiDownbeat, lofiDrums, lofiTempo } from '../music/lofi';
 import { takeChords } from '../music/progression';
 import type { Mode } from '../analysis/types';
 import { velocityOf } from '../analysis/velocity';
@@ -30,6 +31,8 @@ const ICON = {
   list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h1M11 16h9"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/></svg>',
   loop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l3 3-3 3"/><path d="M4 11V9a3 3 0 0 1 3-3h13"/><path d="M7 21l-3-3 3-3"/><path d="M20 13v2a3 3 0 0 1-3 3H4"/></svg>',
+  drums: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="10" rx="8" ry="3.2"/><path d="M4 10v6.5c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2V10"/><path d="M8.5 12.8v6.3M15.5 12.8v6.3"/><path d="M3 3.5l6.5 5M21 3.5l-6.5 5"/></svg>',
+  keys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 13v6M15 13v6"/><path d="M7.5 5v8h3V5M13.5 5v8h3V5"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
@@ -64,13 +67,15 @@ const TEMPLATE = `
     </div>
     <div class="m-chords m-more" id="m-chords"></div>
     <div class="m-dials">
+      <button class="m-dial m-part" id="m-drums" aria-label="Drums" aria-pressed="false">${ICON.drums}</button>
+      <button class="m-dial m-part" id="m-chordsbtn" aria-label="Chords" aria-pressed="true">${ICON.keys}</button>
       <button class="m-dial" id="m-chroma" aria-label="Break out of the key"><b>♯</b><span class="m-pips" id="m-pips"></span></button>
       <button class="m-dial" id="m-spice" aria-label="Spice up the chords"><span class="m-peppers" id="m-peppers"></span></button>
     </div>
     <div class="m-toggles m-more">
       <button class="m-toggle" id="t-voice" aria-pressed="true">Voice</button>
       <button class="m-toggle" id="t-melody" aria-pressed="false">Melody</button>
-      <button class="m-toggle" id="t-keys" aria-pressed="true">Keys</button>
+      <button class="m-toggle" id="t-rain" aria-pressed="false">Rain</button>
     </div>
     <div class="m-controls">
       <button class="m-side rec" id="m-new" aria-label="Record a new idea"><span></span></button>
@@ -119,6 +124,12 @@ function heardOutside(raw: Note[], shown: Note[], scale: Set<number> | null): { 
   return out;
 }
 
+/** A note carried through a time map (start and end both moved). */
+function moved(n: Note, map: (t: number) => number): Note {
+  const start = map(n.start);
+  return { ...n, start, duration: Math.max(0.02, map(n.start + n.duration) - start) };
+}
+
 export function mountMobile(root: HTMLElement): void {
   root.innerHTML = TEMPLATE;
   const $ = <T extends HTMLElement>(id: string): T => root.querySelector<T>(`#${id}`) as T;
@@ -137,7 +148,6 @@ export function mountMobile(root: HTMLElement): void {
   const toggles = {
     voice: $<HTMLButtonElement>('t-voice'),
     melody: $<HTMLButtonElement>('t-melody'),
-    keys: $<HTMLButtonElement>('t-keys'),
     loop: $<HTMLButtonElement>('t-loop'),
   };
 
@@ -156,6 +166,32 @@ export function mountMobile(root: HTMLElement): void {
   let tapInfo: { i: number; midi: number; until: number } | null = null;
 
   const on = (b: HTMLButtonElement): boolean => b.getAttribute('aria-pressed') === 'true';
+
+  // What plays along, per take: chords (on by default), lo-fi drums, rain.
+  // With drums on, the recording is also slid and gently stretched onto their grid.
+  const drumsOn = (r: { drums?: boolean } | null = current): boolean => !!r?.drums;
+  const keysOn = (r: { keys?: boolean } | null = current): boolean => r?.keys !== false;
+  const rainOn = (r: { rain?: boolean } | null = current): boolean => !!r?.rain;
+  const drumsBtn = $<HTMLButtonElement>('m-drums');
+  const keysBtn = $<HTMLButtonElement>('m-chordsbtn');
+  const rainBtn = $<HTMLButtonElement>('t-rain');
+  drumsBtn.addEventListener('click', () => {
+    if (!current) return;
+    current.drums = !drumsOn();
+    cue = 0; // the recording moved onto / off the grid: old positions no longer mean the same
+    refresh();
+    if (!player.playing) player.seek(cue);
+  });
+  keysBtn.addEventListener('click', () => {
+    if (!current) return;
+    current.keys = !keysOn();
+    refresh();
+  });
+  rainBtn.addEventListener('click', () => {
+    if (!current) return;
+    current.rain = !rainOn();
+    refresh();
+  });
 
   // "More": key, tempo, the chord chips and the part toggles stay hidden until asked for.
   const page = $<HTMLElement>('m');
@@ -385,12 +421,53 @@ export function mountMobile(root: HTMLElement): void {
   $<HTMLButtonElement>('m-enhance').addEventListener('click', () => void analyze('high'));
 
   // ---------- result ----------
+  let lofi: { src: StoredRecording['analysis']; key: string; samples: Float32Array; analysis: NonNullable<StoredRecording['analysis']>; map: (t: number) => number } | null = null;
+  let lofiEdited: { from: Note[]; to: Note[] } | null = null;
+
+  /**
+   * The take as it is heard and drawn. Normally the take itself. With Lo-fi on:
+   * the same take with its phrases slid and gently stretched onto the beat grid
+   * (audio, notes and pitch line all moved together). Derived, never stored.
+   */
+  function take(): StoredRecording | null {
+    const rec = current;
+    if (!rec || !drumsOn(rec) || !rec.analysis) return rec;
+    const s0 = effectiveSettings(rec.analysis, rec.overrides);
+    const key = `${rec.id}|${s0.bpm}|${s0.firstBeatMs}`;
+    if (!lofi || lofi.src !== rec.analysis || lofi.key !== key) {
+      const a = rec.analysis;
+      const w = alignToGrid(rec.samples, rec.sampleRate, a.notes, s0.bpm, s0.firstBeatMs / 1000);
+      lofi = {
+        src: a,
+        key,
+        samples: w.samples,
+        map: w.map,
+        analysis: {
+          ...a,
+          durationSec: w.durationSec,
+          notes: a.notes.map((n) => moved(n, w.map)),
+          pitch: { ...a.pitch, times: Float32Array.from(a.pitch.times, (t) => w.map(t)) },
+        },
+      };
+      lofiEdited = null;
+    }
+    let editedNotes: Note[] | undefined;
+    if (rec.editedNotes) {
+      const map = lofi.map;
+      if (lofiEdited?.from !== rec.editedNotes) lofiEdited = { from: rec.editedNotes, to: rec.editedNotes.map((n) => moved(n, map)) };
+      editedNotes = lofiEdited.to;
+    }
+    return { ...rec, samples: lofi.samples, analysis: lofi.analysis, editedNotes };
+  }
+
   function settings(): Settings | null {
-    return current ? effectiveSettings(effectiveAnalysis(current), current.overrides) : null;
+    const r = take();
+    return r ? effectiveSettings(effectiveAnalysis(r), r.overrides) : null;
   }
 
   function computeChords(s: Settings): Chord[] {
-    return current ? takeChords(current, s, { chordsPerBar: 'auto', floaty: true }) : [];
+    const r = take();
+    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: true }) : [];
   }
 
   /**
@@ -416,8 +493,9 @@ export function mountMobile(root: HTMLElement): void {
 
   /** Visible time span: the sung part with a little air, and the whole loop section. */
   function span(): [number, number] {
-    const dur = current ? current.samples.length / current.sampleRate : 1;
-    if (!current?.analysis || shown.length === 0) return [0, dur];
+    const r = take();
+    const dur = r ? r.samples.length / r.sampleRate : 1;
+    if (!r?.analysis || shown.length === 0) return [0, dur];
     const first = Math.min(...shown.map((n) => n.start));
     const last = Math.max(...shown.map((n) => n.start + n.duration));
     const lp = loopSpan();
@@ -425,9 +503,12 @@ export function mountMobile(root: HTMLElement): void {
   }
 
   function render(): void {
-    const rec = current;
+    const rec = take();
     const s = settings();
     if (!rec || !s || !rec.analysis) return;
+    drumsBtn.setAttribute('aria-pressed', String(drumsOn()));
+    keysBtn.setAttribute('aria-pressed', String(keysOn()));
+    rainBtn.setAttribute('aria-pressed', String(rainOn()));
     title.textContent = rec.name + (rec.analysis.quality === 'high' ? ' ✦' : '');
     const [tonic, mode] = s.key ? [s.key.name.split(' ')[0], s.key.name.split(' ')[1] ?? ''] : ['—', 'key'];
     $<HTMLElement>('m-key').textContent = tonic;
@@ -486,7 +567,8 @@ export function mountMobile(root: HTMLElement): void {
   /** Best chords for a slot (fit to the melody there), with the current one marked. */
   function choicesFor(c: Chord): ChordChoice[] {
     const s = settings();
-    const eff = current ? effectiveAnalysis(current) : null;
+    const r = take();
+    const eff = r ? effectiveAnalysis(r) : null;
     if (!s?.key || !eff) return [];
     return chordChoices(eff.notes, s.key, c.start, c.start + c.duration);
   }
@@ -664,7 +746,7 @@ export function mountMobile(root: HTMLElement): void {
     const W = r.width;
     const H = r.height;
     const [t0, t1] = span();
-    const notes = [...(current?.analysis?.notes ?? []), ...shown];
+    const notes = [...(take()?.analysis?.notes ?? []), ...shown];
     let lo = Math.min(...notes.map((n) => n.midi), 60) - 2;
     let hi = Math.max(...notes.map((n) => n.midi), 60) + 2;
     if (notes.length) {
@@ -685,7 +767,7 @@ export function mountMobile(root: HTMLElement): void {
   }
 
   function draw(): void {
-    const rec = current;
+    const rec = take();
     const a = rec?.analysis;
     const s = settings();
     const c = canvas.getContext('2d');
@@ -860,7 +942,8 @@ export function mountMobile(root: HTMLElement): void {
         o.keyTonic = s.key.tonic;
         o.keyMode = s.key.mode;
       }
-      current.editedNotes = shown.map((n) => ({ ...n }));
+      const own = drumsOn() ? (effectiveAnalysis(current)?.notes ?? []) : shown;
+      current.editedNotes = own.map((n) => ({ ...n }));
     }
     const n = current.editedNotes[i];
     if (!n) return;
@@ -963,11 +1046,12 @@ export function mountMobile(root: HTMLElement): void {
 
   async function startPlayback(from: number): Promise<void> {
     const s = settings();
-    if (!current || !s) return;
+    const rec = take();
+    if (!current || !rec || !s) return;
     const lp = on(toggles.loop) ? loopSpan() : null;
     const last = chords[chords.length - 1];
     const backing = lp && last && last.start + last.duration < lp[1] ? [...chords.slice(0, -1), { ...last, duration: lp[1] - last.start }] : chords;
-    await player.play(current.samples, current.sampleRate, {
+    await player.play(rec.samples, rec.sampleRate, {
       from,
       click: false,
       voice: on(toggles.voice),
@@ -976,12 +1060,14 @@ export function mountMobile(root: HTMLElement): void {
       beatsPerBar: 4,
       clickGain: 0,
       notes: on(toggles.melody)
-        ? (effectiveAnalysis(current)?.notes ?? []).map((n) => ({ midi: n.midi, start: n.start, duration: n.duration, velocity: velocityOf(n) }))
+        ? shown.map((n) => ({ midi: n.midi, start: n.start, duration: n.duration, velocity: velocityOf(n) }))
         : [],
       notesTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       notesGain: on(toggles.voice) ? 0.16 : 0.28,
-      drums: [],
-      chords: on(toggles.keys) ? backing : [],
+      drums: drumsOn() ? lofiDrums(lofiTempo(s.bpm), lofiDownbeat(shown, s.bpm, s.firstBeatMs / 1000), lp ? lp[1] : rec.samples.length / rec.sampleRate) : [],
+      drumStyle: 'lofi',
+      rain: rainOn(),
+      chords: keysOn() ? backing : [],
       backingTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       chordStyle: 'floaty',
       loop: lp ? { start: lp[0], end: lp[1] } : null,

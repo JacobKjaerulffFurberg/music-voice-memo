@@ -257,9 +257,21 @@ button {
 /* The two dials: big, the main things to play with after Play. */
 .m-dials {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: 1fr 1fr 2fr 2fr;
+  gap: 8px;
   flex: none;
+}
+/* Drums / chords: icon-only on-off buttons. */
+.m-part {
+  color: var(--muted);
+}
+.m-part svg {
+  width: 28px;
+  height: 28px;
+}
+.m-part[aria-pressed='true'] {
+  color: var(--note);
+  background: color-mix(in srgb, var(--note) 18%, var(--surface));
 }
 .m-dial {
   height: 68px;
@@ -268,7 +280,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 10px;
   transition: background 150ms;
 }
 .m-dial:active {

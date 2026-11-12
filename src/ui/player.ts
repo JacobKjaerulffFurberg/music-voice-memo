@@ -23,6 +23,10 @@ export interface PlayOptions {
   notesTuningCents: number;
   notesGain: number;
   drums: DrumHit[];
+  /** 'lofi': a soft, dusty kit through tape-style filtering with a bed of hiss. Default: the plain kit. */
+  drumStyle?: 'plain' | 'lofi';
+  /** Rain on the window: a looped recording (public/sounds/rain.*) that keeps going across loop passes. */
+  rain?: boolean;
   chords: Chord[];
   /** Pitch offset for chords/bass (match the recording when the voice is audible). */
   backingTuningCents: number;
@@ -125,6 +129,101 @@ export class Player {
     return Math.max(1.5, Math.min(5, want / KEYS_RMS));
   }
 
+  private rainLoad: Promise<AudioBuffer | null> | null = null;
+  private rainWanted = false;
+  private rainNow: { src: AudioBufferSourceNode; gain: GainNode; off: ReturnType<typeof setTimeout> | null } | null = null;
+
+  /**
+   * The rain is a real recording (public/sounds/rain.*), not a synth. It is
+   * loaded once, levelled, and its last two seconds are blended into its first
+   * two so it loops without a seam. No file, or a format this browser can't
+   * decode: no rain, and nothing else is affected.
+   */
+  private loadRain(ctx: AudioContext): Promise<AudioBuffer | null> {
+    this.rainLoad ??= (async () => {
+      for (const name of ['rain.m4a', 'rain.mp3', 'rain.ogg']) {
+        try {
+          const res = await fetch(new URL(`./sounds/${name}`, document.baseURI));
+          if (!res.ok) continue;
+          const raw = await ctx.decodeAudioData(await res.arrayBuffer());
+          const fade = Math.min(Math.floor(raw.length / 4), Math.round(2 * raw.sampleRate));
+          const len = raw.length - fade;
+          const out = ctx.createBuffer(raw.numberOfChannels, len, raw.sampleRate);
+          let sum = 0;
+          for (let ch = 0; ch < raw.numberOfChannels; ch++) {
+            const src = raw.getChannelData(ch);
+            const dst = out.getChannelData(ch);
+            dst.set(src.subarray(0, len));
+            for (let i = 0; i < fade; i++) {
+              const x = i / fade;
+              dst[i] = src[i] * x + src[len + i] * (1 - x);
+            }
+            for (let i = 0; i < len; i += 7) sum += dst[i] * dst[i];
+          }
+          // Same quiet level whatever the recording was mastered at.
+          const rms = Math.sqrt(sum / ((len / 7) * raw.numberOfChannels));
+          const k = rms > 1e-5 ? Math.min(8, 0.035 / rms) : 1;
+          for (let ch = 0; ch < out.numberOfChannels; ch++) {
+            const d = out.getChannelData(ch);
+            for (let i = 0; i < len; i++) d[i] *= k;
+          }
+          return out;
+        } catch {
+          // Missing or undecodable here: try the next format.
+        }
+      }
+      return null;
+    })();
+    return this.rainLoad;
+  }
+
+  private startRain(ctx: AudioContext): void {
+    const level = 1;
+    this.rainWanted = true;
+    if (this.rainNow) {
+      // Still raining (or fading out from a restart): just bring it back up.
+      const t = ctx.currentTime;
+      if (this.rainNow.off) clearTimeout(this.rainNow.off);
+      this.rainNow.off = null;
+      const g = this.rainNow.gain.gain;
+      g.cancelScheduledValues(t);
+      g.setTargetAtTime(level, t, 0.15);
+      return;
+    }
+    void this.loadRain(ctx).then((buf) => {
+      if (!buf || !this.rainWanted || this.rainNow) return;
+      const t = ctx.currentTime;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.setTargetAtTime(level, t, 0.4);
+      src.connect(gain).connect(ctx.destination);
+      src.start(t, Math.random() * Math.max(0, buf.duration - 1));
+      this.rainNow = { src, gain, off: null };
+    });
+  }
+
+  private stopRain(): void {
+    this.rainWanted = false;
+    const r = this.rainNow;
+    const ctx = this.ctx;
+    if (!r || !ctx || r.off) return;
+    const t = ctx.currentTime;
+    r.gain.gain.cancelScheduledValues(t);
+    r.gain.gain.setTargetAtTime(0, t, 0.25);
+    // Let it fade; if playback restarts meanwhile, startRain keeps this one going.
+    r.off = setTimeout(() => {
+      try {
+        r.src.stop();
+      } catch {
+        // already stopped
+      }
+      if (this.rainNow === r) this.rainNow = null;
+    }, 1500);
+  }
+
   /** How the previous chord was played (so the next one is played differently). */
   private lastWay = '';
 
@@ -175,6 +274,7 @@ export class Player {
     this.samples = samples;
     this.sampleRate = sampleRate;
     this.opts = o;
+    if (o.rain) this.startRain(ctx);
     this.duration = samples.length / sampleRate;
     // A loop may run past the end of the recording (a whole-bar loop with a silent tail).
     const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? { start: Math.max(0, o.loop.start), end: o.loop.end } : null;
@@ -265,7 +365,46 @@ export class Player {
       }
     }
 
-    if (o.drums.length > 0) {
+    if (o.drums.length > 0 && o.drumStyle === 'lofi') {
+      // Everything through a dull, slightly driven "tape": no sharp highs, rounded peaks.
+      const tape = ctx.createBiquadFilter();
+      tape.type = 'lowpass';
+      tape.frequency.value = 8200;
+      tape.Q.value = 0.5;
+      const warmth = ctx.createBiquadFilter();
+      warmth.type = 'lowshelf';
+      warmth.frequency.value = 140;
+      warmth.gain.value = 3.5;
+      const drive = ctx.createWaveShaper();
+      drive.curve = this.warmCurve();
+      drive.oversample = '2x';
+      const out = ctx.createGain();
+      // Sit with the recording: a loud take gets a louder kit.
+      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.8;
+      tape.connect(warmth).connect(drive).connect(out).connect(ctx.destination);
+      for (const h of o.drums) {
+        if (h.time < a0 || h.time >= b0) continue;
+        this.lofiDrum(ctx, tape, h, at + (h.time - a0));
+      }
+      // A quiet bed of hiss under it all, which also hides the cuts between phrases.
+      const hiss = ctx.createBufferSource();
+      hiss.buffer = this.noiseBuffer(ctx);
+      hiss.loop = true;
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 2400;
+      band.Q.value = 0.4;
+      const quiet = ctx.createGain();
+      const len = b0 - a0;
+      quiet.gain.setValueAtTime(0, at);
+      quiet.gain.linearRampToValueAtTime(0.012, at + 0.05);
+      quiet.gain.setValueAtTime(0.012, at + Math.max(0.05, len - 0.05));
+      quiet.gain.linearRampToValueAtTime(0, at + len);
+      hiss.connect(band).connect(quiet).connect(out);
+      hiss.start(at);
+      hiss.stop(at + len + 0.02);
+      nodes.push(hiss);
+    } else if (o.drums.length > 0) {
       const bus = ctx.createGain();
       bus.gain.value = 0.55;
       bus.connect(ctx.destination);
@@ -590,6 +729,92 @@ export class Player {
     this.nodes.push(osc);
   }
 
+  /** One hit of the lo-fi kit: soft thud of a kick, a dusty snare, short muffled hats. Never quite the same twice. */
+  private lofiDrum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
+    const v = h.velocity * (0.88 + 0.24 * Math.random());
+    const when = t + (Math.random() - 0.3) * 0.006; // a little loose, leaning late
+    const noise = (): AudioBufferSourceNode => {
+      const n = ctx.createBufferSource();
+      n.buffer = this.noiseBuffer(ctx);
+      n.loopStart = Math.random() * 0.5;
+      return n;
+    };
+    if (h.kind === 'kick') {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.frequency.setValueAtTime(96, when);
+      osc.frequency.exponentialRampToValueAtTime(40, when + 0.11);
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(0.95 * v, when + 0.006);
+      g.gain.setTargetAtTime(0, when + 0.035, 0.11);
+      osc.connect(g).connect(dest);
+      osc.start(when);
+      osc.stop(when + 0.7);
+      const click = noise();
+      const cb = ctx.createBiquadFilter();
+      cb.type = 'bandpass';
+      cb.frequency.value = 2800;
+      cb.Q.value = 1;
+      const cg = ctx.createGain();
+      cg.gain.setValueAtTime(0.1 * v, when);
+      cg.gain.setTargetAtTime(0, when, 0.004);
+      click.connect(cb).connect(cg).connect(dest);
+      click.start(when, Math.random() * 0.5);
+      click.stop(when + 0.05);
+      this.nodes.push(osc, click);
+    } else if (h.kind === 'snare') {
+      const n = noise();
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 1700 + Math.random() * 300;
+      band.Q.value = 0.8;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(0.5 * v, when + 0.004);
+      g.gain.setTargetAtTime(0, when + 0.01, 0.06);
+      n.connect(band).connect(g).connect(dest);
+      n.start(when, Math.random() * 0.5);
+      n.stop(when + 0.4);
+      const body = ctx.createOscillator();
+      body.type = 'triangle';
+      body.frequency.setValueAtTime(210, when);
+      body.frequency.exponentialRampToValueAtTime(165, when + 0.08);
+      const bg = ctx.createGain();
+      bg.gain.setValueAtTime(0.28 * v, when);
+      bg.gain.setTargetAtTime(0, when, 0.045);
+      body.connect(bg).connect(dest);
+      body.start(when);
+      body.stop(when + 0.3);
+      const top = noise();
+      const hi = ctx.createBiquadFilter();
+      hi.type = 'highpass';
+      hi.frequency.value = 4800;
+      const tg = ctx.createGain();
+      tg.gain.setValueAtTime(0, when);
+      tg.gain.linearRampToValueAtTime(0.2 * v, when + 0.002);
+      tg.gain.setTargetAtTime(0, when + 0.004, 0.03);
+      top.connect(hi).connect(tg).connect(dest);
+      top.start(when, Math.random() * 0.5);
+      top.stop(when + 0.25);
+      this.nodes.push(n, body, top);
+    } else {
+      const n = noise();
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'bandpass';
+      hp.frequency.value = 8600;
+      hp.Q.value = 0.9;
+      const g = ctx.createGain();
+      const open = h.kind === 'openhat';
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(0.22 * v, when + 0.002);
+      g.gain.setTargetAtTime(0, when + 0.004, open ? 0.07 : 0.018);
+      n.connect(hp).connect(g).connect(dest);
+      n.start(when, Math.random() * 0.5);
+      n.stop(when + (open ? 0.5 : 0.15));
+      this.nodes.push(n);
+    }
+  }
+
   private drum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
     const v = h.velocity;
     if (h.kind === 'kick') {
@@ -635,6 +860,7 @@ export class Player {
   }
 
   stop(keepPosition = true): void {
+    this.stopRain();
     if (this.playing && keepPosition) this.stopped = this.position;
     if (this.timer) {
       clearInterval(this.timer);
