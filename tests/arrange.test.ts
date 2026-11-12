@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { barStarts, chordChoices, chordTones, chromaChords, drumHits, flavours, floatChords, keysLift, revoice, spiceChords, suggestChords, voiceChord } from '../src/music/arrange';
+import { barStarts, chordChoices, chordTones, drumHits, flavours, floatChords, keysLift, revoice, spiceChords, suggestChords, voiceChord } from '../src/music/arrange';
 import type { Note } from '../src/analysis/types';
+import { applyIntent } from '../src/analysis/intent';
+import { intentOf } from '../src/model';
 
 const g = { bpm: 120, firstBeatSec: 0.5, beatsPerBar: 4, durationSec: 8.5 };
 const n = (midi: number, beat: number, beats = 1): Note => ({
@@ -185,24 +187,24 @@ describe('spice and chord choices', () => {
     }
   });
 
-  it('breaks out of the key more with each chromatic level', () => {
+  it('chromatic dial: embraces sung outside notes, leaves a plain tune alone', () => {
     const C = { tonic: 0, mode: 'major' as const };
-    // C E G E | A C A F | D G B G | C: a plain C F G C tune.
-    const mel = [n(60, 0), n(64, 1), n(67, 2), n(64, 3), n(69, 4), n(72, 5), n(69, 6), n(65, 7), n(62, 8), n(67, 9), n(71, 10), n(67, 11), n(60, 12, 4)];
-    const plain = suggestChords(mel, C, g, { chordsPerBar: 1 });
-    const scale = new Set([0, 2, 4, 5, 7, 9, 11]);
-    const outside = (cs: typeof plain): number => cs.filter((c) => !chordTones(c.root, c.quality).every((pc) => scale.has(pc))).length;
-    expect(outside(plain)).toBe(0);
-    expect(chromaChords(plain, mel, C, 0)).toBe(plain);
-    const counts = [1, 2, 3].map((lv) => outside(chromaChords(plain, mel, C, lv)));
-    expect(counts[2]).toBeGreaterThan(0);
-    expect(counts[1]).toBeGreaterThanOrEqual(counts[0]);
-    expect(counts[2]).toBeGreaterThanOrEqual(counts[1]);
-    const wild = chromaChords(plain, mel, C, 3);
-    expect(wild[0].name).toBe(plain[0].name);
-    expect(wild[wild.length - 1].name).toBe(plain[plain.length - 1].name);
-    // Hand-picked chords are left alone.
-    expect(chromaChords(plain, mel, C, 3, new Set([1, 2])).map((c) => c.name)).toEqual(plain.map((c) => c.name));
+    const names = (mel: Note[], chroma: number): string[] => suggestChords(mel, C, g, { chordsPerBar: 1, chroma }).map((c) => c.name);
+    // C E G E | A C A F | D G B G | C: nothing outside the key, so no level may touch it.
+    const plain = [n(60, 0), n(64, 1), n(67, 2), n(64, 3), n(69, 4), n(72, 5), n(69, 6), n(65, 7), n(62, 8), n(67, 9), n(71, 10), n(67, 11), n(60, 12, 4)];
+    for (const lv of [1, 2, 3]) expect(names(plain, lv)).toEqual(['C', 'F', 'G', 'C']);
+    // Bar 2 sings A C# E A: the C# is outside C major. Turned up, the chord that owns it (A7, leading to Dm) is used.
+    const outside = [n(60, 0), n(64, 1), n(67, 2), n(64, 3), n(69, 4), n(73, 5), n(76, 6), n(69, 7), n(62, 8), n(65, 9), n(69, 10), n(65, 11), n(60, 12, 4)];
+    expect(names(outside, 0)[1]).not.toBe('A7');
+    expect(names(outside, 1)).toEqual(['C', 'A7', 'Dm', 'C']);
+    expect(names(outside, 3)[0]).toBe('C');
+    // The dial also decides whether a sung outside note is pulled into the key at all.
+    const leaning: Note = { ...n(73, 0), cents: -30 }; // C#, sung 30 cents flat: leans toward C
+    const ctx = { key: C, bpm: 120, firstBeatSec: 0.5 };
+    expect(applyIntent([leaning], ctx, intentOf({ chroma: 0 }))[0].midi).toBe(72);
+    expect(applyIntent([leaning], ctx, intentOf({ chroma: 1 }))[0].midi).toBe(73);
+    expect(applyIntent([{ ...leaning, cents: -48 }], ctx, intentOf({ chroma: 2 }))[0].midi).toBe(72);
+    expect(applyIntent([{ ...leaning, cents: -48 }], ctx, intentOf({ chroma: 3 }))[0].midi).toBe(73);
   });
 
   it('offers the augmented chord when the raised 5th is sung', () => {

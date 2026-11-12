@@ -7,7 +7,7 @@ import { estimateKeyFromNotes } from './analysis/key';
 import { requantize } from './analysis/notes';
 import { assignVelocities } from './analysis/velocity';
 import type { AnalysisResult, InputSource, Mode, Note } from './analysis/types';
-import type { Quality } from './music/arrange';
+import { CHROMA_FIT_DISTANCE, type Quality } from './music/arrange';
 
 export interface Overrides {
   bpm?: number;
@@ -44,8 +44,10 @@ export interface StoredRecording {
   loop?: { start: number; end: number; on: boolean };
 }
 
-export function intentOf(rec: { intent?: IntentOptions }): IntentOptions {
-  return { ...DEFAULT_INTENT, ...rec.intent };
+/** The chromatic dial also decides how readily sung outside notes are pulled into the key. */
+export function intentOf(rec: { intent?: IntentOptions; chroma?: number }): IntentOptions {
+  const level = Math.max(0, Math.min(3, rec.chroma ?? 0));
+  return { ...DEFAULT_INTENT, fitMaxDistance: CHROMA_FIT_DISTANCE[level], ...rec.intent };
 }
 
 export function isChordsTake(a: AnalysisResult | null): boolean {
@@ -65,6 +67,7 @@ export function effectiveAnalysis(rec: {
   editedNotes?: Note[];
   overrides?: Overrides;
   intent?: IntentOptions;
+  chroma?: number;
 }): AnalysisResult | null {
   const stored = rec.analysis;
   if (!stored) return stored;

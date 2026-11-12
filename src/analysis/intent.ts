@@ -15,6 +15,8 @@ import { velocityOf } from './velocity';
 
 export interface IntentOptions {
   fitToKey: boolean;
+  /** How far (semitones) an outside note may be pulled onto an in-key neighbour (default 0.8; 0 = never). */
+  fitMaxDistance?: number;
   /** Grid subdivisions per beat for quantize (2 = 1/8, 4 = 1/16, 3 = 1/8T); 0 = off. */
   quantizeGrid: number;
   /** 0..1 */
@@ -101,7 +103,8 @@ export function legato(notes: Note[], maxGapSec: number): Note[] {
 
 export function applyIntent(notes: Note[], ctx: IntentContext, o: IntentOptions = DEFAULT_INTENT): Note[] {
   let out = o.minVelocity > 0 ? notes.filter((n) => velocityOf(n) >= o.minVelocity) : notes;
-  if (o.fitToKey && ctx.key) out = fitToKey(out, ctx.key);
+  const reach = o.fitMaxDistance ?? 0.8;
+  if (o.fitToKey && ctx.key && reach > 0) out = fitToKey(out, ctx.key, reach);
   out = quantizeNotes(out, ctx, o.quantizeGrid, o.quantizeStrength);
   if (o.legato && !ctx.polyphonic) out = legato(out, 60 / ctx.bpm);
   return out;

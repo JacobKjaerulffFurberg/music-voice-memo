@@ -6,7 +6,7 @@
  */
 
 import { effectiveAnalysis, isChordsTake, type Settings, type StoredRecording } from '../model';
-import { chordName, chromaChords, floatChords, keysLift, prefersSharps, revoice, spiceChords, suggestChords, voicePlayedChords, type Chord } from './arrange';
+import { chordName, floatChords, keysLift, prefersSharps, revoice, spiceChords, suggestChords, voicePlayedChords, type Chord } from './arrange';
 
 export interface TakeChordOptions {
   chordsPerBar: 1 | 2 | 'auto';
@@ -28,7 +28,7 @@ export function takeChords(rec: StoredRecording, s: Settings, o: TakeChordOption
   if (played) base = voicePlayedChords(eff.playedChords ?? []);
   else if (s.key) {
     const grid = { bpm: s.bpm, firstBeatSec: s.firstBeatMs / 1000, beatsPerBar: 4, durationSec: rec.samples.length / rec.sampleRate };
-    base = suggestChords(eff.notes, s.key, grid, { chordsPerBar: o.chordsPerBar });
+    base = suggestChords(eff.notes, s.key, grid, { chordsPerBar: o.chordsPerBar, chroma: rec.chroma ?? 0 });
   } else return [];
 
   const edits = rec.chordEdits ?? {};
@@ -40,7 +40,6 @@ export function takeChords(rec: StoredRecording, s: Settings, o: TakeChordOption
     keep.add(i);
     return { ...c, slot, root: e.root, quality: e.quality, name: chordName(e.root, e.quality, prefersSharps(s.key)), numeral: '' };
   });
-  if (s.key && !played) base = chromaChords(base, eff.notes, s.key, rec.chroma ?? 0, keep);
   const spiced = s.key ? spiceChords(base, eff.notes, s.key, rec.spice ?? 0, keep) : base;
   // A sung take with a low voice gets the keys voiced a little higher, just above the voice.
   const voiced = revoice(spiced, played ? 0 : keysLift(eff.notes));

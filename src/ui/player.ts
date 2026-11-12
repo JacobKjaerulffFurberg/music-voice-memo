@@ -91,6 +91,43 @@ export class Player {
     return this.buffer.buf;
   }
 
+  private loud: { for: Float32Array; rms: number } | null = null;
+
+  /**
+   * How loud the recording is where there is sound in it: the level of its
+   * louder moments (80th percentile of 50 ms windows), so silence between
+   * phrases doesn't drag the figure down.
+   */
+  private voiceLoudness(): number {
+    const x = this.samples;
+    if (!x || x.length === 0) return 0;
+    if (this.loud?.for === x) return this.loud.rms;
+    const win = Math.max(1, Math.round(this.sampleRate * 0.05));
+    const frames: number[] = [];
+    for (let i = 0; i + win <= x.length; i += win) {
+      let sum = 0;
+      for (let j = i; j < i + win; j++) sum += x[j] * x[j];
+      frames.push(Math.sqrt(sum / win));
+    }
+    frames.sort((a, b) => a - b);
+    const rms = frames.length ? frames[Math.floor(frames.length * 0.8)] : 0;
+    this.loud = { for: x, rms };
+    return rms;
+  }
+
+  /**
+   * Gain for the keys so they sit just under the voice whatever level it was
+   * recorded at: a loud take gets louder keys, a quiet one keeps them modest.
+   */
+  private keysLevel(): number {
+    const KEYS_RMS = 0.045; // roughly what a held chord measures at gain 1
+    const want = 0.7 * this.voiceLoudness();
+    return Math.max(1.5, Math.min(5, want / KEYS_RMS));
+  }
+
+  /** How the previous chord was played (so the next one is played differently). */
+  private lastWay = '';
+
   private voiceIn: { ctx: AudioContext; node: AudioNode } | null = null;
 
   /**
@@ -139,7 +176,8 @@ export class Player {
     this.sampleRate = sampleRate;
     this.opts = o;
     this.duration = samples.length / sampleRate;
-    const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? { start: Math.max(0, o.loop.start), end: Math.min(this.duration, o.loop.end) } : null;
+    // A loop may run past the end of the recording (a whole-bar loop with a silent tail).
+    const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? { start: Math.max(0, o.loop.start), end: o.loop.end } : null;
     let from = Math.max(0, Math.min(o.from, this.duration));
     if (loop && (from < loop.start || from >= loop.end)) from = loop.start;
     const t0 = ctx.currentTime + 0.05;
@@ -242,7 +280,7 @@ export class Player {
       // (the classic suitcase tremolo) and a small room. Tails ring past each change.
       const bus = ctx.createBiquadFilter();
       bus.type = 'lowpass';
-      bus.frequency.value = 3400;
+      bus.frequency.value = 2800;
       bus.Q.value = 0.4;
       const drive = ctx.createWaveShaper();
       drive.curve = this.warmCurve();
@@ -262,48 +300,71 @@ export class Player {
       wet.gain.value = 0.3;
       const verb = ctx.createConvolver();
       verb.buffer = this.roomImpulse(ctx);
-      bus.connect(drive).connect(sway);
-      sway.connect(dry).connect(ctx.destination);
-      sway.connect(verb).connect(wet).connect(ctx.destination);
-      // Bass: a round, filtered tone instead of a bare sine.
-      const low = ctx.createBiquadFilter();
-      low.type = 'lowpass';
-      low.frequency.value = 320;
-      low.connect(ctx.destination);
+      const breathe = ctx.createGain();
+      breathe.gain.value = 0.93;
+      const swell = ctx.createOscillator();
+      swell.frequency.value = 4.3;
+      const swellDepth = ctx.createGain();
+      swellDepth.gain.value = 0.07;
+      swell.connect(swellDepth).connect(breathe.gain);
+      swell.start(at);
+      swell.stop(at + (b0 - a0) + 8);
+      nodes.push(swell);
+      bus.connect(drive).connect(breathe).connect(sway);
+      const level = ctx.createGain();
+      level.gain.value = this.keysLevel();
+      const limit = ctx.createDynamicsCompressor();
+      limit.threshold.value = -8;
+      limit.knee.value = 6;
+      limit.ratio.value = 12;
+      limit.attack.value = 0.003;
+      limit.release.value = 0.15;
+      level.connect(limit).connect(ctx.destination);
+      sway.connect(dry).connect(level);
+      sway.connect(verb).connect(wet).connect(level);
       const beat = 60 / o.bpm;
-      o.chords.forEach((c, ci) => {
+      o.chords.forEach((c) => {
         const end = Math.min(b0, c.start + c.duration);
         if (end <= a0 || c.start >= b0) return;
         const b = at + (end - a0);
-        // The same chord always gets the same "hand": repeatable, but never two alike in a row.
-        const rnd = (k: number): number => {
-          const x = Math.sin((ci + 1) * 127.1 + k * 311.7) * 43758.5453;
-          return x - Math.floor(x);
-        };
+        const rnd = Math.random; // a fresh hand every time, every loop pass included
         const hz = (m: number): number => mtof(m, o.backingTuningCents);
         const touch = (m: number, t: number, vel: number): void => {
           if (t < a0 || t >= b0) return;
-          this.rhodes(ctx, bus, hz(m), at + (t - a0), b, vel);
+          this.rhodes(ctx, bus, hz(m), at + (t - a0), b, Math.max(0.12, Math.min(1, vel)));
         };
-        // Rolled, not struck: the bass leads, then the hand unfolds low to high with
-        // uneven gaps, the top note a touch louder so the chord sings.
-        const gap = 0.034 + 0.03 * rnd(0);
-        const top = c.voicing.length - 1;
+        // How this chord is played: never the same way twice in a row.
+        const ways = ['up', 'up', 'down', 'together', 'split', 'outside-in'] as const;
+        let way = ways[Math.floor(rnd() * ways.length)];
+        if (way === this.lastWay) way = ways[(ways.indexOf(way) + 2) % ways.length];
+        this.lastWay = way;
+        // How hard: mostly medium, sometimes a soft brush, now and then a firmer push.
+        const r = rnd();
+        const force = r < 0.25 ? 0.62 + 0.1 * rnd() : r > 0.88 ? 1.08 : 0.82 + 0.16 * rnd();
+        // The whole hand lands a few ms late or early, like a person.
+        const land = c.start + 0.012 + rnd() * 0.022;
+        const n = c.voicing.length;
+        const top = n - 1;
+        const gap = 0.026 + 0.04 * rnd();
         c.voicing.forEach((m, k) => {
-          touch(m, c.start + 0.02 + k * gap + rnd(k + 1) * 0.014, k === top ? 0.82 : 0.55 + 0.14 * rnd(k + 7));
+          let when: number;
+          if (way === 'up') when = k * gap;
+          else if (way === 'down') when = (top - k) * gap;
+          else if (way === 'together') when = rnd() * 0.009;
+          else if (way === 'split') when = 0.07 + 0.05 * rnd() + rnd() * 0.008; // bass first, then the hand as a block
+          else when = (k === 0 || k === top ? 0 : 0.045 + (k - 1) * gap * 0.7) + rnd() * 0.006; // outer notes, then the inside
+          touch(m, land + when + rnd() * 0.008, force * ((k === top ? 0.66 : 0.52) + 0.2 * rnd()));
         });
-        // On a long chord the hand comes back: a soft re-touch of the upper notes off the beat.
-        if (c.duration >= 3.2 * beat) {
-          const t2 = c.start + 2.5 * beat + rnd(20) * 0.02;
-          c.voicing.slice(-2).forEach((m, k) => touch(m, t2 + k * 0.03, 0.36 + 0.08 * rnd(k + 30)));
-        } else if (c.duration >= 1.8 * beat) {
-          touch(c.voicing[top], c.start + 1.5 * beat + rnd(21) * 0.02, 0.34);
+        // On a long chord the hand sometimes comes back: a soft re-touch off the beat.
+        if (c.duration >= 3.2 * beat && rnd() < 0.6) {
+          const t2 = c.start + (rnd() < 0.5 ? 2.5 : 3) * beat + rnd() * 0.03;
+          const again = rnd() < 0.5 ? c.voicing.slice(-2) : c.voicing.slice(1, 3);
+          again.forEach((m, k) => touch(m, t2 + k * 0.03, force * (0.26 + 0.1 * rnd())));
+        } else if (c.duration >= 1.8 * beat && rnd() < 0.4) {
+          touch(c.voicing[top], c.start + 1.5 * beat + rnd() * 0.03, force * 0.26);
         }
-        if (c.start >= a0) {
-          const st = at + (c.start - a0);
-          this.tone(ctx, low, 'triangle', hz(c.bass), st, b, 0.3, 0.04, 0.6);
-          this.tone(ctx, low, 'sine', hz(c.bass), st, b, 0.12, 0.04, 0.6);
-        }
+        // The bass is the left hand of the same piano: it leads, then fades and wavers like every other note.
+        touch(c.bass, c.start + rnd() * 0.01, force * (0.9 + 0.12 * rnd()));
       });
     } else if (o.chords.length > 0) {
       const pad = ctx.createBiquadFilter();
@@ -379,7 +440,7 @@ export class Player {
     const keep = this.nodes;
     this.nodes = [];
     voicing.forEach((m, k) => this.rhodes(ctx, ctx.destination, mtof(m, tuningCents), t + k * 0.02, t + 0.9, 0.8));
-    this.tone(ctx, ctx.destination, 'sine', mtof(bass, tuningCents), t, t + 0.9, 0.25, 0.02, 0.4);
+    this.rhodes(ctx, ctx.destination, mtof(bass, tuningCents), t, t + 0.9, 0.9);
     this.nodes = keep;
   }
 
@@ -420,36 +481,52 @@ export class Player {
   }
 
   /**
-   * One electric-piano note. Two tines a few cents apart, left and right, so the
-   * note shimmers slowly instead of sitting still like a sine; their FM "bark"
-   * settles to a warm body rather than fading to a pure tone; a soft low-passed
-   * triangle underneath gives the note weight. Soft attack, no metallic ping.
+   * One electric-piano note, built so it never sits still like a held sine:
+   *  - it decays the whole time it is held, like a real tine (quick settle, then a long fade);
+   *  - two tines a few cents apart, left and right, beat slowly against each other;
+   *  - each note is tuned a hair differently and wavers very slowly in pitch;
+   *  - the FM "bark" settles to a body that keeps some overtones;
+   *  - a soft triangle underneath starts bright and closes, giving weight;
+   *  - notes in the upper middle (where a pure tone bites the ear) are played softer.
    */
   private rhodes(ctx: AudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number): void {
-    const peak = 0.07 * vel;
-    const release = 0.75;
+    const balance = hz > 330 ? Math.pow(330 / hz, 0.45) : 1;
+    const peak = 0.075 * vel * balance;
+    const release = 0.7;
     const hold = Math.max(start + 0.05, end);
     const stop = hold + release * 4;
     const env = ctx.createGain();
     env.gain.setValueAtTime(0, start);
-    env.gain.linearRampToValueAtTime(peak, start + 0.016);
-    env.gain.setTargetAtTime(peak * 0.45, start + 0.016, 0.9);
+    env.gain.linearRampToValueAtTime(peak, start + 0.02);
+    env.gain.setTargetAtTime(peak * 0.5, start + 0.02, 0.22);
+    if (hold > start + 0.6) env.gain.setTargetAtTime(peak * 0.1, start + 0.6, 1.7);
     env.gain.setTargetAtTime(0, hold, release);
     env.connect(dest);
     const oscs: OscillatorNode[] = [];
+    // A slow, shallow waver in pitch, different for every note.
+    const waver = ctx.createOscillator();
+    waver.frequency.value = 0.3 + Math.random() * 0.5;
+    const waverDepth = ctx.createGain();
+    waverDepth.gain.value = 2 + Math.random() * 2; // cents
+    waver.connect(waverDepth);
+    oscs.push(waver);
+    const off = (Math.random() - 0.5) * 5; // cents: no two notes tuned exactly alike
     for (const [cents, pan] of [
       [-5, -0.4],
       [5, 0.4],
     ]) {
-      const f = hz * Math.pow(2, cents / 1200);
+      const f = hz * Math.pow(2, (cents + off) / 1200);
       const car = ctx.createOscillator();
       car.frequency.value = f;
       const mod = ctx.createOscillator();
       mod.frequency.value = f;
+      waverDepth.connect(car.detune);
+      waverDepth.connect(mod.detune);
       const index = ctx.createGain();
-      // Harder touch = more bark; it settles to a warm, slightly hollow body.
+      // Harder touch = more bark; it settles to a body with overtones left in it, then mellows.
       index.gain.setValueAtTime(f * (0.5 + 0.9 * vel), start);
-      index.gain.setTargetAtTime(f * 0.24, start, 0.2);
+      index.gain.setTargetAtTime(f * 0.45, start, 0.25);
+      index.gain.setTargetAtTime(f * 0.28, start + 0.7, 1.5);
       mod.connect(index).connect(car.frequency);
       const side = ctx.createStereoPanner();
       side.pan.value = pan;
@@ -461,11 +538,13 @@ export class Player {
     const body = ctx.createOscillator();
     body.type = 'triangle';
     body.frequency.value = hz;
+    waverDepth.connect(body.detune);
     const soft = ctx.createBiquadFilter();
     soft.type = 'lowpass';
-    soft.frequency.value = Math.min(1600, hz * 3);
+    soft.frequency.setValueAtTime(Math.min(2400, hz * 5), start);
+    soft.frequency.setTargetAtTime(Math.min(1100, hz * 2), start, 0.5);
     const weight = ctx.createGain();
-    weight.gain.value = 0.4;
+    weight.gain.value = 0.35;
     body.connect(soft).connect(weight).connect(env);
     oscs.push(body);
     for (const n of oscs) {

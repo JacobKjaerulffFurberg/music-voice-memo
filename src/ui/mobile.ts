@@ -21,11 +21,15 @@ import { velocityOf } from '../analysis/velocity';
 import { deleteRecording, listRecordings, loadRecording, saveRecording } from '../storage/db';
 import { Player } from './player';
 
+/** Height of the chord-name band along the top of the melody (a touch target). */
+const HEAD = 44;
+
 type View = 'idle' | 'recording' | 'analyzing' | 'result';
 
 const ICON = {
   list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h1M11 16h9"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/></svg>',
+  loop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l3 3-3 3"/><path d="M4 11V9a3 3 0 0 1 3-3h13"/><path d="M7 21l-3-3 3-3"/><path d="M20 13v2a3 3 0 0 1-3 3H4"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
@@ -52,6 +56,7 @@ const TEMPLATE = `
     <div class="m-facts m-more">
       <button class="m-fact" id="m-key-fact" aria-label="Change the key"><b id="m-key">—</b><span id="m-mode">key</span></button>
       <button class="m-fact" id="m-bpm-fact" aria-label="Halve or double the tempo"><b id="m-bpm">—</b><span>bpm</span></button>
+      <button class="m-fact m-enh" id="m-enhance" aria-label="Enhance: slower, more careful analysis">✦</button>
       <a class="m-fact m-daw" href="./" aria-label="Open the full editor"><span>DAW</span></a>
     </div>
     <div class="m-melody-wrap">
@@ -66,12 +71,11 @@ const TEMPLATE = `
       <button class="m-toggle" id="t-voice" aria-pressed="true">Voice</button>
       <button class="m-toggle" id="t-melody" aria-pressed="false">Melody</button>
       <button class="m-toggle" id="t-keys" aria-pressed="true">Keys</button>
-      <button class="m-toggle" id="t-loop" aria-pressed="false">Loop</button>
     </div>
     <div class="m-controls">
       <button class="m-side rec" id="m-new" aria-label="Record a new idea"><span></span></button>
       <button class="m-play" id="m-play" aria-label="Play">${ICON.play}</button>
-      <button class="m-side" id="m-enhance" aria-label="Enhance" title="Enhance: slower, more careful analysis">✦</button>
+      <button class="m-side m-loop" id="t-loop" aria-label="Loop" aria-pressed="false">${ICON.loop}</button>
     </div>
   </section>
 
@@ -148,7 +152,8 @@ export function mountMobile(root: HTMLElement): void {
   let cue = 0;
   let recStart = 0;
   let starting = false;
-  let tapInfo: { text: string; until: number } | null = null;
+  /** The note whose name is shown for a moment (tapped or being dragged). */
+  let tapInfo: { i: number; midi: number; until: number } | null = null;
 
   const on = (b: HTMLButtonElement): boolean => b.getAttribute('aria-pressed') === 'true';
 
@@ -388,13 +393,35 @@ export function mountMobile(root: HTMLElement): void {
     return current ? takeChords(current, s, { chordsPerBar: 'auto', floaty: true }) : [];
   }
 
-  /** Visible time span: the sung part, with a little air. */
+  /**
+   * The section that loops: whole bars on the take's grid, from the bar line
+   * under the first sung note to the bar line after the last one. A phrase that
+   * stops mid-bar gets the rest of that bar as silence (it may run past the end
+   * of the recording), so the loop always comes round in time.
+   */
+  function loopSpan(): [number, number] | null {
+    const s = settings();
+    if (!s || shown.length === 0) return null;
+    const beat = 60 / s.bpm;
+    const bar = 4 * beat;
+    const first = Math.min(...shown.map((n) => n.start));
+    const last = Math.max(...shown.map((n) => n.start + n.duration));
+    const fb = s.firstBeatMs / 1000;
+    // A note a hair before or after a bar line still belongs to that bar.
+    let start = fb + Math.floor((first + 0.25 * beat - fb) / bar) * bar;
+    if (start < 0) start += bar * Math.ceil(-start / bar - 1e-9);
+    const bars = Math.max(1, Math.ceil((last - 0.25 * beat - start) / bar));
+    return [start, start + bars * bar];
+  }
+
+  /** Visible time span: the sung part with a little air, and the whole loop section. */
   function span(): [number, number] {
     const dur = current ? current.samples.length / current.sampleRate : 1;
     if (!current?.analysis || shown.length === 0) return [0, dur];
     const first = Math.min(...shown.map((n) => n.start));
     const last = Math.max(...shown.map((n) => n.start + n.duration));
-    return [Math.max(0, first - 0.35), Math.min(dur, last + 0.5)];
+    const lp = loopSpan();
+    return [Math.max(0, Math.min(first - 0.35, lp ? lp[0] - 0.1 : Infinity)), Math.max(Math.min(dur, last + 0.5), lp ? lp[1] + 0.1 : 0)];
   }
 
   function render(): void {
@@ -621,6 +648,7 @@ export function mountMobile(root: HTMLElement): void {
     b.addEventListener('click', () => {
       b.setAttribute('aria-pressed', String(!on(b)));
       if (player.playing) void startPlayback(player.position);
+      else draw();
     });
   }
 
@@ -647,7 +675,7 @@ export function mountMobile(root: HTMLElement): void {
       lo--;
       hi++;
     }
-    const top = 36;
+    const top = HEAD + 8;
     const bottom = 30;
     const padX = 14;
     const x = (t: number): number => padX + ((t - t0) / (t1 - t0)) * (W - 2 * padX);
@@ -707,7 +735,7 @@ export function mountMobile(root: HTMLElement): void {
       c.fillRect(Math.round(xx), 0, 1, g.H);
       c.font = '600 14px system-ui, sans-serif';
       c.fillStyle = `hsl(${hue(ch.root)} 80% 84%)`;
-      c.fillText(ch.name, Math.max(6, xx + 7), 18, Math.max(12, w - 10));
+      c.fillText(ch.name, Math.max(6, xx + 7), HEAD / 2, Math.max(12, w - 10));
     }
 
     // Notes as soft pills: the melody the chords follow. Dotted = where a note was
@@ -781,6 +809,16 @@ export function mountMobile(root: HTMLElement): void {
     c.stroke();
     c.globalAlpha = 1;
 
+    // Loop on: what lies outside the looped bars is dimmed.
+    const lp = on(toggles.loop) ? loopSpan() : null;
+    if (lp) {
+      c.fillStyle = getComputedStyle(root).getPropertyValue('--bg').trim();
+      c.globalAlpha = 0.6;
+      c.fillRect(0, 0, Math.max(0, g.x(lp[0])), g.H);
+      c.fillRect(g.x(lp[1]), 0, Math.max(0, g.W - g.x(lp[1])), g.H);
+      c.globalAlpha = 1;
+    }
+
     // Start marker + playhead.
     const xc = g.x(cue);
     c.fillStyle = col.muted;
@@ -795,20 +833,20 @@ export function mountMobile(root: HTMLElement): void {
       c.strokeStyle = col.accent;
       c.lineWidth = 2;
       c.beginPath();
-      c.moveTo(xp, 30);
+      c.moveTo(xp, HEAD);
       c.lineTo(xp, g.H - 26);
       c.stroke();
     }
 
     // What you tapped: the note's name.
-    if (tapInfo && performance.now() < tapInfo.until) {
-      c.font = '500 13px system-ui, sans-serif';
-      const w = c.measureText(tapInfo.text).width + 20;
+    const named = tapInfo && performance.now() < tapInfo.until ? shown[tapInfo.i] : undefined;
+    if (tapInfo && named) {
+      c.font = '600 12px system-ui, sans-serif';
       c.fillStyle = col.fg;
-      pill(c, g.W - w - 10, g.H - 30, w, 24);
-      c.fill();
-      c.fillStyle = getComputedStyle(root).getPropertyValue('--bg').trim();
-      c.fillText(tapInfo.text, g.W - w, g.H - 18);
+      c.textAlign = 'center';
+      const nx = (g.x(named.start) + Math.max(g.x(named.start) + rowH, g.x(named.start + named.duration))) / 2;
+      c.fillText(noteName(tapInfo.midi), Math.max(16, Math.min(g.W - 16, nx)), g.y(tapInfo.midi) - rowH / 2 - 9);
+      c.textAlign = 'start';
     }
   }
 
@@ -829,9 +867,23 @@ export function mountMobile(root: HTMLElement): void {
     current.editedNotes[i] = { ...n, midi, cents: 0 };
     refresh();
   }
-  function hear(midi: number): void {
+  /**
+   * Swap a chord for the next one that makes sense under that stretch of melody:
+   * the best fits first (relative minor / major, subdominant, dominant, then
+   * borrowed colours), round and round back to where it started.
+   */
+  function nextChord(ci: number): void {
+    const c = chords[ci];
+    const list = c ? choicesFor(c).slice(0, 6) : [];
+    if (!c || list.length < 2) return;
+    const exact = list.findIndex((x) => x.root === c.root && x.quality === c.quality);
+    const at = exact >= 0 ? exact : list.findIndex((x) => x.root === c.root);
+    const next = list[(at + 1) % list.length];
+    setChord(ci, next.root, next.quality);
+  }
+  function hear(i: number, midi: number): void {
     const s = settings();
-    tapInfo = { text: noteName(midi), until: performance.now() + 2500 };
+    tapInfo = { i, midi, until: performance.now() + 2500 };
     setTimeout(draw, 2600);
     if (s && !player.playing) void player.preview(midi, on(toggles.voice) ? s.tuningCents : 0);
   }
@@ -843,6 +895,11 @@ export function mountMobile(root: HTMLElement): void {
     const g = geometry();
     const t = g.t(e.clientX - r.left);
     const y = e.clientY - r.top;
+    if (y < HEAD) {
+      const ci = chords.findIndex((ch) => t >= ch.start && t < ch.start + ch.duration);
+      if (ci >= 0) nextChord(ci);
+      return;
+    }
     const i = shown.findIndex((nn) => t >= nn.start - 0.05 && t <= nn.start + nn.duration + 0.05);
     if (i < 0) {
       setCue(Math.max(0, t));
@@ -867,7 +924,7 @@ export function mountMobile(root: HTMLElement): void {
     const m = Math.max(Math.ceil(g.lo), Math.min(Math.floor(g.hi), drag.from + Math.round(dy / row)));
     if (m !== drag.midi) {
       drag.midi = m;
-      hear(m);
+      hear(drag.i, m);
     }
     draw();
   });
@@ -880,10 +937,10 @@ export function mountMobile(root: HTMLElement): void {
       if (d.midi !== d.from) setNote(d.i, d.midi);
       else draw();
     } else if (d.ghost !== null) {
-      hear(d.ghost);
+      hear(d.i, d.ghost);
       setNote(d.i, d.ghost);
     } else {
-      tapInfo = { text: noteName(n.midi), until: performance.now() + 2500 };
+      tapInfo = { i: d.i, midi: n.midi, until: performance.now() + 2500 };
       setTimeout(draw, 2600);
       setCue(Math.max(0, n.start));
     }
@@ -907,7 +964,9 @@ export function mountMobile(root: HTMLElement): void {
   async function startPlayback(from: number): Promise<void> {
     const s = settings();
     if (!current || !s) return;
-    const [t0, t1] = span();
+    const lp = on(toggles.loop) ? loopSpan() : null;
+    const last = chords[chords.length - 1];
+    const backing = lp && last && last.start + last.duration < lp[1] ? [...chords.slice(0, -1), { ...last, duration: lp[1] - last.start }] : chords;
     await player.play(current.samples, current.sampleRate, {
       from,
       click: false,
@@ -922,10 +981,10 @@ export function mountMobile(root: HTMLElement): void {
       notesTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       notesGain: on(toggles.voice) ? 0.16 : 0.28,
       drums: [],
-      chords: on(toggles.keys) ? chords : [],
+      chords: on(toggles.keys) ? backing : [],
       backingTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       chordStyle: 'floaty',
-      loop: on(toggles.loop) ? { start: t0, end: t1 } : null,
+      loop: lp ? { start: lp[0], end: lp[1] } : null,
     });
     playBtn.innerHTML = ICON.stop;
     playBtn.setAttribute('aria-label', 'Stop');

@@ -261,9 +261,13 @@ export function voiceChord(root: number, quality: Quality, prev: number[] | null
 export interface ChordOptions {
   /** 'auto' splits a bar into two chords when the melody clearly changes harmony mid-bar. */
   chordsPerBar: 1 | 2 | 'auto';
+  /** 0–3: how readily chords from outside the key are used where the melody sings outside notes. */
+  chroma: number;
 }
 
 interface ScoreContext {
+  /** 0–3, see ChordOptions.chroma. */
+  chroma?: number;
   key: { tonic: number; mode: Mode };
   degrees: Degree[];
   scale: Set<number>;
@@ -325,23 +329,41 @@ function scoreChord(d: Degree, w: Float64Array, total: number, ctx: ScoreContext
 }
 
 /**
- * A sung note from outside the key that is the raised 5th of a major chord in
- * the key (A# over D) is taken as meant: that augmented chord (D+) becomes a
- * candidate, and wins when the note carries enough of the slot.
+ * Chords for sung notes from outside the key. They are only ever candidates
+ * where the melody really has such a note, and they still have to fit the rest
+ * of the melody better than the in-key chords: a plain tonic stays a tonic.
+ *
+ * Always: the augmented chord whose raised 5th is the note (A# over D → D+),
+ * and borrowed chords containing it (C over D major → C, the bVII).
+ * Chromatic level 1+: dominant 7ths that lead to a chord of the key.
+ * Level 2+: any major or minor triad containing the note.
+ * Higher levels also make these chords win more readily.
  */
 function raisedFifths(w: Float64Array, total: number, ctx: ScoreContext): Degree[] {
   const out: Degree[] = [];
   if (total <= 0) return out;
+  const level = ctx.chroma ?? 0;
+  const prior = 0.1 + 0.12 * level;
+  const tonic = ctx.key.tonic;
   for (let pc = 0; pc < 12; pc++) {
     if (ctx.scale.has(pc) || w[pc] / total < 0.04) continue;
+    const has = (offset: number, quality: Quality): boolean => chordTones(tonic + offset, quality).includes(pc);
     for (const d of ctx.degrees) {
-      if (d.quality === 'maj' && (ctx.key.tonic + d.offset + 8) % 12 === pc) {
-        out.push({ offset: d.offset, quality: 'aug', numeral: `${d.numeral}+`, prior: d.prior * 0.5 });
+      if (d.quality === 'maj' && (tonic + d.offset + 8) % 12 === pc) {
+        out.push({ offset: d.offset, quality: 'aug', numeral: `${d.numeral}+`, prior: d.prior * 0.5 + 0.1 * level });
       }
     }
-    // Any other sung outside note: the borrowed chords that contain it (C over D major → C, the bVII).
-    for (const b of BORROWED[ctx.key.mode]) {
-      if (chordTones(ctx.key.tonic + b.offset, b.quality).includes(pc)) out.push({ ...b, prior: 0.1 });
+    for (const b of BORROWED[ctx.key.mode]) if (has(b.offset, b.quality)) out.push({ ...b, prior });
+    if (level >= 1) {
+      for (const d of ctx.degrees) {
+        const offset = (d.offset + 7) % 12;
+        if (d.quality !== 'dom7' && d.offset !== 0 && has(offset, 'dom7')) out.push({ offset, quality: 'dom7', numeral: `V7/${d.numeral}`, prior });
+      }
+    }
+    if (level >= 2) {
+      for (let offset = 0; offset < 12; offset++) {
+        for (const quality of ['maj', 'min'] as const) if (has(offset, quality)) out.push({ offset, quality, numeral: '', prior: prior - 0.08 });
+      }
     }
   }
   return out;
@@ -409,7 +431,7 @@ export function suggestChords(
   bars.forEach((b, bi) => {
     const end = Math.min(b + bar, g.durationSec);
     const edge = bi === 0 || bi === bars.length - 1;
-    const ctx = (): ScoreContext => ({ key, degrees, scale, prev: prev ? { root: prev.root, quality: prev.quality } : null, edge });
+    const ctx = (): ScoreContext => ({ key, degrees, scale, prev: prev ? { root: prev.root, quality: prev.quality } : null, edge, chroma: options.chroma ?? 0 });
     const whole = melodyWeights(notes, b, end);
     const mid = Math.min(b + bar / 2, end);
     const halves = end - mid > 0.05 ? [melodyWeights(notes, b, mid), melodyWeights(notes, mid, end)] : null;
@@ -521,57 +543,13 @@ export function spiceChords(chords: Chord[], notes: Note[], key: { tonic: number
   });
 }
 
-export const CHROMA_LEVELS = ['In key', 'Borrowed', 'Chromatic', 'Outside'] as const;
+export const CHROMA_LEVELS = ['In key', 'Loose', 'Chromatic', 'Free'] as const;
 
 /**
- * Break out of the key: swap chords for ones from outside it, more boldly per level.
- *  1: a chord leading into the next one (its dominant 7th) or a borrowed chord, only where the melody fits just as well;
- *  2: also tritone substitutes and a few darker borrowed chords, accepting some rub with the melody;
- *  3: also chords a third away from the original, accepting a lot of rub.
- * The first and last chords and hand-picked ones (`keep`) stay.
+ * How far (semitones) a sung outside note may be pulled onto its in-key neighbour,
+ * per chromatic level. 0.8 pulls anything leaning 20 cents or more; 0 never pulls.
  */
-export function chromaChords(chords: Chord[], notes: Note[], key: { tonic: number; mode: Mode }, level: number, keep: Set<number> = new Set()): Chord[] {
-  if (level <= 0 || chords.length < 3) return chords;
-  const degrees = key.mode === 'major' ? MAJOR_DEGREES : MINOR_DEGREES;
-  const scale = new Set((key.mode === 'major' ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10, 11]).map((x) => (key.tonic + x) % 12));
-  const ctx: ScoreContext = { key, degrees, scale, prev: null, edge: false };
-  const tol = [0, 0.05, 0.3, 0.7][Math.min(3, level)];
-  const sharps = prefersSharps(key);
-  return chords.map((c, i) => {
-    if (keep.has(i) || i === 0 || i === chords.length - 1) return c;
-    const next = chords[i + 1];
-    const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
-    const fit = (root: number, quality: Quality): number =>
-      total > 0 ? scoreChord({ offset: (root - key.tonic + 12) % 12, quality, numeral: '', prior: 0 }, w, total, ctx) : 0;
-    const pool: { root: number; quality: Quality; bonus: number }[] = [];
-    const add = (r: number, quality: Quality, bonus: number): void => {
-      const root = ((r % 12) + 12) % 12;
-      if (chordTones(root, quality).every((pc) => scale.has(pc))) return; // already in the key: not a break
-      pool.push({ root, quality, bonus });
-    };
-    if (next.root !== c.root) {
-      add(next.root + 7, 'dom7', 0.12); // leads into the next chord
-      if (level >= 2) add(next.root + 1, 'dom7', 0.1); // tritone substitute: slides down into it
-    }
-    for (const b of BORROWED[key.mode]) add(key.tonic + b.offset, b.quality, 0.04);
-    if (level >= 2) {
-      add(key.tonic + 3, 'maj', 0.02);
-      add(key.tonic + 1, 'maj7', 0.02);
-      add(key.tonic + 7, 'min', 0.02);
-    }
-    if (level >= 3) for (const d of [3, 4, 8, 9]) add(c.root + d, 'maj', 0.03);
-    let best: { root: number; quality: Quality } | null = null;
-    let bestScore = fit(c.root, c.quality) - tol;
-    for (const p of pool) {
-      const s = fit(p.root, p.quality) + p.bonus;
-      if (s > bestScore) {
-        bestScore = s;
-        best = p;
-      }
-    }
-    return best ? { ...c, root: best.root, quality: best.quality, name: chordName(best.root, best.quality, sharps), numeral: '' } : c;
-  });
-}
+export const CHROMA_FIT_DISTANCE = [0.8, 0.65, 0.55, 0] as const;
 
 /**
  * Re-voice a progression for smooth voice leading (after edits / spice).

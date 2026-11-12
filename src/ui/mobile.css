@@ -366,7 +366,7 @@ button {
 
 .m-toggles {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
   flex: none;
 }
@@ -406,6 +406,22 @@ button {
   height: 24px;
   border-radius: 50%;
   background: var(--accent);
+}
+.m-loop {
+  color: var(--muted);
+}
+.m-loop svg {
+  width: 28px;
+  height: 28px;
+}
+.m-loop[aria-pressed='true'] {
+  color: var(--bg);
+  background: var(--keys);
+}
+.m-enh {
+  font-size: 20px;
+  padding: 6px 12px;
+  align-items: center;
 }
 .m-side:disabled {
   opacity: 0.4;
