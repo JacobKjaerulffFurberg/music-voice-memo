@@ -154,6 +154,29 @@ describe('spice and chord choices', () => {
     expect(spiceChords(c, rub, key, 1)[0].name).not.toBe('Cmaj7');
   });
 
+it('with a seed, mixes the colours instead of one extension for all', () => {
+    // Eight bars: C F G C Am F G C.
+    const long = [n(60, 0, 2), n(64, 2, 2), n(65, 4, 2), n(69, 6, 2), n(67, 8, 2), n(71, 10, 2), n(72, 12, 4), n(69, 16, 2), n(72, 18, 2), n(65, 20, 2), n(69, 22, 2), n(67, 24, 2), n(74, 26, 2), n(72, 28, 4)];
+    const b = suggestChords(long, key, { ...g, durationSec: 32 }, { chordsPerBar: 1 });
+    const names = (level: number, seed: number): string[] => spiceChords(b, long, key, level, new Set(), seed).map((c) => c.name);
+    // Same seed, same chords; another seed, another take.
+    expect(names(2, 5)).toEqual(names(2, 5));
+    const takes = new Set([1, 2, 3, 4, 5, 6, 7, 8].map((s) => names(3, s).join()));
+    expect(takes.size).toBeGreaterThan(3);
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const sp = spiceChords(b, long, key, 3, new Set(), seed);
+      // Home stays home, and neighbours on the same kind of chord do not wear the same colour.
+      expect(sp[0].root).toBe(0);
+      expect(sp[sp.length - 1].root).toBe(0);
+      expect(new Set(sp.map((c) => c.quality)).size).toBeGreaterThan(2);
+    }
+    // Somewhere across the seeds a chord is swapped for a relative (a root the plain version does not have there).
+    const swapped = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].some((s) => spiceChords(b, long, key, 3, new Set(), s).some((c, i) => c.root !== b[i].root));
+    expect(swapped).toBe(true);
+    // A picked chord is still left alone.
+    expect(spiceChords(b, long, key, 3, new Set([1]), 4)[1].name).toBe(b[1].name);
+  });
+
   it('keeps chords the user picked', () => {
     const sp = spiceChords(base, mel, key, 2, new Set([0]));
     expect(sp[0].name).toBe('C');

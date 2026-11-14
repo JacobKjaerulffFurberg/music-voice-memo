@@ -128,6 +128,21 @@ describe('lo-fi: drums', () => {
     expect(lofiDownbeat([], 160, 0.5)).toBe(0.5);
   });
 
+  it('has three feels: super chill, normal, busy', () => {
+    const count = (feel: number): number => lofiDrums(80, 0, 12, feel).length; // four 3-second bars
+    expect(count(0)).toBeLessThan(count(1) / 1.5);
+    expect(count(2)).toBeGreaterThan(count(1) * 1.3);
+    // Super chill: at most 7 hits a bar, one snare, and it sits on beat 3.
+    const chill = lofiDrums(80, 0, 3, 0);
+    expect(chill.length).toBeLessThanOrEqual(7);
+    const snares = chill.filter((h) => h.kind === 'snare');
+    expect(snares).toHaveLength(1);
+    expect(snares[0].time).toBeGreaterThan(1.5);
+    expect(snares[0].time).toBeLessThan(1.56);
+    // The default is the normal beat.
+    expect(lofiDrums(80, 0, 12)).toEqual(lofiDrums(80, 0, 12, 1));
+  });
+
   it('lays a swung beat on the grid for the whole length', () => {
     const hits = lofiDrums(120, 0.5, 8.5);
     const kicks = hits.filter((h) => h.kind === 'kick' && h.velocity === 1).map((h) => h.time);

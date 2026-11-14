@@ -14,13 +14,17 @@ import { fitGridAtBpm, onsetsFromNotes } from '../analysis/tempo';
 import type { Note } from '../analysis/types';
 import { micPermissionGranted, Recorder } from '../audio/recorder';
 import { effectiveAnalysis, effectiveSettings, newId, type Settings, type StoredRecording } from '../model';
-import { chordChoices, CHROMA_LEVELS, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
-import { alignToGrid, lofiDownbeat, lofiDrums, lofiTempo } from '../music/lofi';
+import { chordChoices, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
+import { GENRES, genreOf, grooveDrums, grooveTempo, montuno, VIBES, vibeOf } from '../music/groove';
+import { alignToGrid, lofiDownbeat } from '../music/lofi';
 import { takeChords } from '../music/progression';
 import type { Mode } from '../analysis/types';
 import { velocityOf } from '../analysis/velocity';
 import { deleteRecording, listRecordings, loadRecording, saveRecording } from '../storage/db';
 import { Player } from './player';
+
+/** The loading tune: how high each of its notes sits (px above the line). */
+const LOAD_TUNE = [0, 8, 16, 8, 20, 12, 4, 14, 24, 10];
 
 /** Height of the chord-name band along the top of the melody (a touch target). */
 const HEAD = 44;
@@ -34,6 +38,7 @@ const ICON = {
   drums: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="10" rx="8" ry="3.2"/><path d="M4 10v6.5c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2V10"/><path d="M8.5 12.8v6.3M15.5 12.8v6.3"/><path d="M3 3.5l6.5 5M21 3.5l-6.5 5"/></svg>',
   keys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 13v6M15 13v6"/><path d="M7.5 5v8h3V5M13.5 5v8h3V5"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
+  wand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
 
@@ -66,13 +71,19 @@ const TEMPLATE = `
       <canvas class="m-melody" id="m-melody"></canvas>
     </div>
     <div class="m-chords m-more" id="m-chords"></div>
+    <div class="m-track" id="m-vibes">${VIBES.map((v) => `<button class="m-vibe" data-vibe="${v.id}" aria-pressed="false"><i></i>${v.label}</button>`).join('')}</div>
     <div class="m-dials">
       <button class="m-dial m-part" id="m-drums" aria-label="Drums" aria-pressed="false">${ICON.drums}</button>
       <button class="m-dial m-part" id="m-chordsbtn" aria-label="Chords" aria-pressed="true">${ICON.keys}</button>
-      <button class="m-dial" id="m-chroma" aria-label="Break out of the key"><b>♯</b><span class="m-pips" id="m-pips"></span></button>
+      <button class="m-dial m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
       <button class="m-dial" id="m-spice" aria-label="Spice up the chords"><span class="m-peppers" id="m-peppers"></span></button>
     </div>
-    <div class="m-toggles m-more">
+    <div class="m-track m-more">
+      <button class="m-feel" id="m-drumfeel" aria-label="How much the drums do">${ICON.drums}<span class="m-pips" id="m-drumfeel-pips"></span></button>
+      <button class="m-feel" id="m-keysfeel" aria-label="How much the piano does">${ICON.keys}<span class="m-pips" id="m-keysfeel-pips"></span></button>
+      <button class="m-feel" id="m-genre" aria-label="Genre">Lo-fi</button>
+    </div>
+    <div class="m-track m-more">
       <button class="m-toggle" id="t-voice" aria-pressed="true">Voice</button>
       <button class="m-toggle" id="t-melody" aria-pressed="false">Melody</button>
       <button class="m-toggle" id="t-rain" aria-pressed="false">Rain</button>
@@ -187,6 +198,68 @@ export function mountMobile(root: HTMLElement): void {
     current.keys = !keysOn();
     refresh();
   });
+  // How much each player does, per take: 0 sparse · 1 normal (default) · 2 busy.
+  const FEEL = ['Super chill', 'Normal', 'Busy'];
+  const feelOf = (v: number | undefined): number => Math.max(0, Math.min(2, v ?? 1));
+  $<HTMLButtonElement>('m-drumfeel').addEventListener('click', () => {
+    if (!current) return;
+    current.drumFeel = (feelOf(current.drumFeel) + 1) % 3;
+    refresh();
+  });
+  $<HTMLButtonElement>('m-keysfeel').addEventListener('click', () => {
+    if (!current) return;
+    current.keysFeel = (feelOf(current.keysFeel) + 1) % 3;
+    refresh();
+  });
+  // Genre (in More): which band plays along. Tap = the next one.
+  $<HTMLButtonElement>('m-genre').addEventListener('click', () => {
+    if (!current) return;
+    const at = GENRES.findIndex((g) => g.id === genreOf(current));
+    current.genre = GENRES[(at + 1) % GENRES.length].id;
+    refresh();
+  });
+
+  // Vibes: one word sets the app's colour, how the take is read and the band. Tap the lit one to let go of it.
+  const vibesEl = $<HTMLDivElement>('m-vibes');
+  function paint(id: string | undefined): void {
+    const rootEl = document.documentElement;
+    if (id) rootEl.dataset.vibe = id;
+    else delete rootEl.dataset.vibe;
+    try {
+      localStorage.setItem('hum-vibe', id ?? '');
+    } catch {
+      // Private mode: just not remembered.
+    }
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(rootEl).getPropertyValue('--bg').trim());
+    vibesEl.querySelectorAll<HTMLElement>('.m-vibe').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.vibe === id)));
+  }
+  try {
+    paint(localStorage.getItem('hum-vibe') || undefined);
+  } catch {
+    // No storage: the plain look.
+  }
+  vibesEl.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('.m-vibe');
+    const v = VIBES.find((x) => x.id === b?.dataset.vibe);
+    if (!current || !v) return;
+    if (current.vibe === v.id) delete current.vibe;
+    else {
+      current.vibe = v.id;
+      current.genre = v.genre;
+      current.drumFeel = v.drumFeel;
+      current.keysFeel = v.keysFeel;
+      current.spice = v.spice;
+      current.chroma = v.chroma;
+      current.rain = !!v.rain;
+      if (v.drums && !drumsOn()) {
+        current.drums = true;
+        cue = 0; // the recording moved onto the grid
+        if (!player.playing) player.seek(0);
+      }
+    }
+    refresh();
+  });
+
   rainBtn.addEventListener('click', () => {
     if (!current) return;
     current.rain = !rainOn();
@@ -293,7 +366,8 @@ export function mountMobile(root: HTMLElement): void {
     recBtn.hidden = v === 'analyzing';
     recBtn.setAttribute('aria-label', v === 'recording' ? 'Stop' : 'Record');
     if (v === 'analyzing') {
-      live.innerHTML = '<div class="m-bar"><i id="m-bar-fill"></i></div>';
+      // A little tune that writes itself: one note lands for every tenth of the work done.
+      live.innerHTML = `<div class="m-load">${LOAD_TUNE.map((y) => `<i style="--y:${y}px"></i>`).join('')}</div>`;
       timer.textContent = '';
     }
     if (v === 'idle') {
@@ -380,28 +454,32 @@ export function mountMobile(root: HTMLElement): void {
     if (!rec) return;
     setView('analyzing');
     // Progress follows the real analysis stages; within a stage the bar eases toward that stage's end.
-    const STAGES: [match: string, word: string, upTo: number][] = [
-      ['Loading', '', 0.12],
-      ['pitch', 'pitch', 0.55],
-      ['Key', 'key', 0.68],
-      ['Rhythm', 'tempo', 0.82],
-      ['Notes', 'notes', 0.96],
-      ['High quality', 'notes', 0.96],
+    const STAGES: [match: string, words: string[], upTo: number][] = [
+      ['Loading', ['ears on'], 0.12],
+      ['pitch', ['chasing your notes', 'catching the tune', 'following the hum'], 0.55],
+      ['Key', ['guessing the key', 'which key was that'], 0.68],
+      ['Rhythm', ['tapping my foot', 'counting one two three'], 0.82],
+      ['Notes', ['writing it down', 'waking the band'], 0.96],
+      ['High quality', ['listening again, slowly'], 0.96],
     ];
-    const fill = live.querySelector<HTMLElement>('#m-bar-fill');
+    const dots = [...live.querySelectorAll<HTMLElement>('.m-load i')];
     let upTo = 0.12;
     let at = 0;
     hint.textContent = '';
     const tick = setInterval(() => {
       at += (upTo - at) * 0.06;
-      if (fill) fill.style.width = `${(at * 100).toFixed(1)}%`;
+      const done = Math.floor(at * dots.length + 0.001);
+      dots.forEach((d, k) => {
+        d.classList.toggle('on', k < done);
+        d.classList.toggle('next', k === done);
+      });
     }, 50);
     const onStage = (stage: string): void => {
       const s = STAGES.find(([m]) => stage.includes(m));
       if (!s) return;
       at = Math.max(at, upTo * 0.9); // the stage before is done
       upTo = Math.max(upTo, s[2]);
-      hint.textContent = s[1];
+      hint.textContent = s[1][Math.floor(Math.random() * s[1].length)];
     };
     try {
       rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, 'auto', onStage, rec.source ?? 'auto', quality);
@@ -423,6 +501,9 @@ export function mountMobile(root: HTMLElement): void {
   // ---------- result ----------
   let lofi: { src: StoredRecording['analysis']; key: string; samples: Float32Array; analysis: NonNullable<StoredRecording['analysis']>; map: (t: number) => number } | null = null;
   let lofiEdited: { from: Note[]; to: Note[] } | null = null;
+  /** Chords the wand just changed, and when: they light up for a moment. */
+  let wandLit = new Set<number>();
+  let wandAt = -1e9;
 
   /**
    * The take as it is heard and drawn. Normally the take itself. With Lo-fi on:
@@ -467,7 +548,8 @@ export function mountMobile(root: HTMLElement): void {
 
   function computeChords(s: Settings): Chord[] {
     const r = take();
-    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: true }) : [];
+    // Lo-fi keys drift with the singing; a Latin band changes chords on the grid.
+    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: genreOf(current) !== 'latin', seed: 1 }) : [];
   }
 
   /**
@@ -509,6 +591,18 @@ export function mountMobile(root: HTMLElement): void {
     drumsBtn.setAttribute('aria-pressed', String(drumsOn()));
     keysBtn.setAttribute('aria-pressed', String(keysOn()));
     rainBtn.setAttribute('aria-pressed', String(rainOn()));
+    paint(vibeOf(current)?.id);
+    const genre = GENRES.find((g) => g.id === genreOf(current)) ?? GENRES[0];
+    $<HTMLElement>('m-genre').textContent = genre.label;
+    $<HTMLElement>('m-genre').setAttribute('aria-label', `Genre: ${genre.label}`);
+    for (const [id, v] of [
+      ['m-drumfeel', feelOf(current?.drumFeel)],
+      ['m-keysfeel', feelOf(current?.keysFeel)],
+    ] as const) {
+      $<HTMLElement>(id).setAttribute('aria-label', `${id === 'm-drumfeel' ? 'Drums' : 'Piano'}: ${FEEL[v]}`);
+      // One dot = super chill, two = normal, three = busy.
+      $<HTMLElement>(`${id}-pips`).innerHTML = [0, 1, 2].map((k) => `<i class="${k <= v ? 'hot' : ''}"></i>`).join('');
+    }
     title.textContent = rec.name + (rec.analysis.quality === 'high' ? ' ✦' : '');
     const [tonic, mode] = s.key ? [s.key.name.split(' ')[0], s.key.name.split(' ')[1] ?? ''] : ['—', 'key'];
     $<HTMLElement>('m-key').textContent = tonic;
@@ -517,9 +611,7 @@ export function mountMobile(root: HTMLElement): void {
     const level = current?.spice ?? 0;
     $<HTMLElement>('m-spice').setAttribute('aria-label', `Chord spice: ${SPICE_LEVELS[level]}`);
     $<HTMLElement>('m-peppers').innerHTML = [1, 2, 3].map((k) => `<i class="${k <= level ? 'hot' : ''}"></i>`).join('');
-    const chroma = current?.chroma ?? 0;
-    $<HTMLElement>('m-chroma').setAttribute('aria-label', `Break out of the key: ${CHROMA_LEVELS[chroma]}`);
-    $<HTMLElement>('m-pips').innerHTML = [1, 2, 3].map((k) => `<i class="${k <= chroma ? 'hot' : ''}"></i>`).join('');
+    $<HTMLElement>('m-wand').classList.toggle('lit', !!current?.wand && level > 0);
     chords = computeChords(s);
     shown =effectiveAnalysis(rec)?.notes ?? [];
     ghosts = heardOutside(rec.analysis.notes, shown, s.key ? scalePitchClasses(s.key.tonic, s.key.mode) : null);
@@ -536,14 +628,63 @@ export function mountMobile(root: HTMLElement): void {
    */
   function hue(root: number): number {
     const tonic = settings()?.key?.tonic ?? 0;
-    return (265 + ((((root - tonic) * 7) % 12) + 12) % 12 * 30) % 360;
+    const steps = ((((root - tonic) * 7) % 12) + 12) % 12;
+    const v = vibeOf(current);
+    if (!v) return (265 + steps * 30) % 360;
+    // In a vibe the chords stay inside its own colours: a few degrees either side of home.
+    return (((v.hue + (steps > 6 ? steps - 12 : steps) * v.spread) % 360) + 360) % 360;
   }
 
   // ---------- chords: chromatic, spice, pick, swipe ----------
-  $<HTMLButtonElement>('m-chroma').addEventListener('click', () => {
-    if (!current) return;
-    current.chroma = ((current.chroma ?? 0) + 1) % CHROMA_LEVELS.length;
+// The wand: a new take on the chords. Other colours, and other chords that carry the melody
+  // just as well. Of a dozen rolls it keeps the one that changes the most, so a tap is always heard.
+  const wandBtn = $<HTMLButtonElement>('m-wand');
+  function sparkle(el: HTMLElement): void {
+    for (let k = 0; k < 14; k++) {
+      const p = document.createElement('i');
+      p.className = 'm-spark';
+      const a = (k / 14) * Math.PI * 2 + Math.random() * 0.5;
+      const d = 36 + Math.random() * 44;
+      p.style.setProperty('--dx', `${(Math.cos(a) * d).toFixed(0)}px`);
+      p.style.setProperty('--dy', `${(Math.sin(a) * d).toFixed(0)}px`);
+      p.style.setProperty('--c', ['var(--keys)', 'var(--note)', 'var(--accent)'][k % 3]);
+      el.appendChild(p);
+      setTimeout(() => p.remove(), 750);
+    }
+  }
+  wandBtn.addEventListener('click', () => {
+    const s0 = settings();
+    if (!current || !s0) return;
+    const before = chords.map((c) => c.name);
+    if (!current.spice) current.spice = 2;
+    let best = current.wand;
+    let most = -1;
+    for (let k = 0; k < 12; k++) {
+      current.wand = 2 + Math.floor(Math.random() * 1e6);
+      const diff = computeChords(s0).filter((c, i) => c.name !== before[i]).length;
+      if (diff > most) {
+        most = diff;
+        best = current.wand;
+      }
+    }
+    current.wand = best;
+    wandBtn.classList.remove('spin');
+    void wandBtn.offsetWidth; // restart the animation
+    wandBtn.classList.add('spin');
+    sparkle(wandBtn);
     refresh();
+    // The chords that changed light up for a moment, and it plays so the change is heard.
+    wandLit = new Set(chords.flatMap((c, i) => (c.name !== before[i] ? [i] : [])));
+    wandAt = performance.now();
+    const glow = (): void => {
+      draw();
+      if (performance.now() - wandAt < 900) requestAnimationFrame(glow);
+    };
+    requestAnimationFrame(glow);
+    if (!player.playing) {
+      const [t0] = span();
+      void startPlayback(Math.max(cue, t0 - 0.2));
+    }
   });
 
   function save(): void {
@@ -781,6 +922,7 @@ export function mountMobile(root: HTMLElement): void {
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.clearRect(0, 0, g.W, g.H);
     const col = colors();
+    const sat = (pct: number): number => Math.min(100, Math.round(pct * (vibeOf(current)?.sat ?? 1)));
     const scale = s.key ? scalePitchClasses(s.key.tonic, s.key.mode) : null;
 
     // Key rows: faint lines on scale notes, labelled tonics.
@@ -811,12 +953,13 @@ export function mountMobile(root: HTMLElement): void {
       const w = g.x(ch.start + ch.duration) - xx;
       if (xx > g.W || xx + w < 0) continue;
       const now = pos >= ch.start && pos < ch.start + ch.duration;
-      c.fillStyle = `hsl(${hue(ch.root)} 55% 60% / ${now ? 0.2 : 0.07})`;
+      const lit = wandLit.has(chords.indexOf(ch)) ? Math.max(0, 1 - (performance.now() - wandAt) / 900) : 0;
+      c.fillStyle = `hsl(${hue(ch.root)} ${sat(55)}% 60% / ${(now ? 0.2 : 0.07) + 0.4 * lit})`;
       c.fillRect(xx, 0, w, g.H);
       c.fillStyle = col.faint;
       c.fillRect(Math.round(xx), 0, 1, g.H);
-      c.font = '600 14px system-ui, sans-serif';
-      c.fillStyle = `hsl(${hue(ch.root)} 80% 84%)`;
+      c.font = `600 ${(14 + 4 * lit).toFixed(1)}px system-ui, sans-serif`;
+      c.fillStyle = `hsl(${hue(ch.root)} ${sat(80)}% 84%)`;
       c.fillText(ch.name, Math.max(6, xx + 7), HEAD / 2, Math.max(12, w - 10));
     }
 
@@ -832,7 +975,7 @@ export function mountMobile(root: HTMLElement): void {
       // A note takes the colour of the chord it sits in.
       const mid = n.start + n.duration / 2;
       const under = chords.find((ch) => mid >= ch.start && mid < ch.start + ch.duration);
-      const tone = under ? `hsl(${hue(under.root)} 70% 72%)` : col.note;
+      const tone = under ? `hsl(${hue(under.root)} ${sat(70)}% 72%)` : col.note;
       c.strokeStyle = tone;
       c.fillStyle = tone;
       c.globalAlpha = held ? 0.95 : 0.7;
@@ -1051,6 +1194,12 @@ export function mountMobile(root: HTMLElement): void {
     const lp = on(toggles.loop) ? loopSpan() : null;
     const last = chords[chords.length - 1];
     const backing = lp && last && last.start + last.duration < lp[1] ? [...chords.slice(0, -1), { ...last, duration: lp[1] - last.start }] : chords;
+    // The band: its own (slow) bar on the take's grid, starting where the singing leans on it.
+    const genre = genreOf(current);
+    const gBpm = grooveTempo(genre, s.bpm);
+    const gFirst = lofiDownbeat(shown, s.bpm, s.firstBeatMs / 1000, gBpm);
+    const end = lp ? lp[1] : rec.samples.length / rec.sampleRate;
+    const latin = genre === 'latin';
     await player.play(rec.samples, rec.sampleRate, {
       from,
       click: false,
@@ -1064,10 +1213,14 @@ export function mountMobile(root: HTMLElement): void {
         : [],
       notesTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       notesGain: on(toggles.voice) ? 0.16 : 0.28,
-      drums: drumsOn() ? lofiDrums(lofiTempo(s.bpm), lofiDownbeat(shown, s.bpm, s.firstBeatMs / 1000), lp ? lp[1] : rec.samples.length / rec.sampleRate) : [],
-      drumStyle: 'lofi',
+      drums: drumsOn() ? grooveDrums(genre, gBpm, gFirst, end, feelOf(current.drumFeel)) : [],
+      drumStyle: latin ? 'latin' : 'lofi',
       rain: rainOn(),
-      chords: keysOn() ? backing : [],
+      keysFeel: feelOf(current.keysFeel),
+      chords: keysOn() && !latin ? backing : [],
+      comp: keysOn() && latin ? montuno(backing, gBpm, gFirst, end, feelOf(current.keysFeel)) : [],
+      keysTone: vibeOf(current)?.tone,
+      voiceRoom: vibeOf(current)?.room,
       backingTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       chordStyle: 'floaty',
       loop: lp ? { start: lp[0], end: lp[1] } : null,

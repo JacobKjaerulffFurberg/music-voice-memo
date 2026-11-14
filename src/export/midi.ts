@@ -100,7 +100,19 @@ export interface MidiBacking {
   drums: DrumHit[];
 }
 
-const GM_DRUM: Record<DrumHit['kind'], number> = { kick: 36, snare: 38, hat: 42, openhat: 46 };
+const GM_DRUM: Record<DrumHit['kind'], number> = {
+  kick: 36,
+  snare: 38,
+  hat: 42,
+  openhat: 46,
+  clave: 75,
+  conga: 63,
+  slap: 62,
+  shell: 37,
+  shaker: 70,
+  cowbell: 56,
+  timbale: 65,
+};
 
 function trackChunk(events: Ev[]): number[] {
   events.sort((a, b) => a.tick - b.tick || a.order - b.order);

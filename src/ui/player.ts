@@ -2,6 +2,7 @@
 
 import { beatTimes } from '../model';
 import type { Chord, DrumHit } from '../music/arrange';
+import type { CompNote } from '../music/groove';
 
 const mtof = (midi: number, cents: number): number => 440 * Math.pow(2, (midi - 69 + cents / 100) / 12);
 
@@ -24,7 +25,15 @@ export interface PlayOptions {
   notesGain: number;
   drums: DrumHit[];
   /** 'lofi': a soft, dusty kit through tape-style filtering with a bed of hiss. Default: the plain kit. */
-  drumStyle?: 'plain' | 'lofi';
+  drumStyle?: 'plain' | 'lofi' | 'latin';
+  /** Written-out piano + bass part (the Latin montuno), played short and bright instead of `chords`. */
+  comp?: CompNote[];
+  /** How bright the floaty keys are (low-pass, Hz). Default 2800. */
+  keysTone?: number;
+  /** How much the piano does: 0 = one soft touch per chord, 1 = normal (default), 2 = busier, fills the space. */
+  keysFeel?: number;
+  /** How much room (reverb) is put on the recorded voice, 0–1. Default 0.07: barely there. */
+  voiceRoom?: number;
   /** Rain on the window: a looped recording (public/sounds/rain.*) that keeps going across loop passes. */
   rain?: boolean;
   chords: Chord[];
@@ -228,6 +237,7 @@ export class Player {
   private lastWay = '';
 
   private voiceIn: { ctx: AudioContext; node: AudioNode } | null = null;
+  private voiceWet: GainNode | null = null;
 
   /**
    * A light polish on the recorded voice, barely there on purpose: rumble cut,
@@ -262,6 +272,7 @@ export class Player {
     room.buffer = this.roomImpulse(ctx);
     const wet = ctx.createGain();
     wet.gain.value = 0.07;
+    this.voiceWet = wet;
     makeup.connect(room).connect(wet).connect(ctx.destination);
     this.voiceIn = { ctx, node: input };
     return input;
@@ -275,6 +286,8 @@ export class Player {
     this.sampleRate = sampleRate;
     this.opts = o;
     if (o.rain) this.startRain(ctx);
+    this.voiceBus(ctx);
+    this.voiceWet?.gain.setTargetAtTime(o.voiceRoom ?? 0.07, ctx.currentTime, 0.05);
     this.duration = samples.length / sampleRate;
     // A loop may run past the end of the recording (a whole-bar loop with a silent tail).
     const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? { start: Math.max(0, o.loop.start), end: o.loop.end } : null;
@@ -365,7 +378,28 @@ export class Player {
       }
     }
 
-    if (o.drums.length > 0 && o.drumStyle === 'lofi') {
+    if (o.drums.length > 0 && o.drumStyle === 'latin') {
+      // A live, open room: bright, a touch of drive, no tape and no hiss.
+      const top = ctx.createBiquadFilter();
+      top.type = 'lowpass';
+      top.frequency.value = 11500;
+      top.Q.value = 0.5;
+      const drive = ctx.createWaveShaper();
+      drive.curve = this.warmCurve();
+      drive.oversample = '2x';
+      const out = ctx.createGain();
+      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.7;
+      top.connect(drive).connect(out).connect(ctx.destination);
+      const room = ctx.createConvolver();
+      room.buffer = this.roomImpulse(ctx);
+      const wet = ctx.createGain();
+      wet.gain.value = 0.1;
+      drive.connect(room).connect(wet).connect(out);
+      for (const h of o.drums) {
+        if (h.time < a0 || h.time >= b0) continue;
+        this.latinDrum(ctx, top, h, at + (h.time - a0));
+      }
+    } else if (o.drums.length > 0 && o.drumStyle === 'lofi') {
       // Everything through a dull, slightly driven "tape": no sharp highs, rounded peaks.
       const tape = ctx.createBiquadFilter();
       tape.type = 'lowpass';
@@ -419,7 +453,7 @@ export class Player {
       // (the classic suitcase tremolo) and a small room. Tails ring past each change.
       const bus = ctx.createBiquadFilter();
       bus.type = 'lowpass';
-      bus.frequency.value = 2800;
+      bus.frequency.value = o.keysTone ?? 2800;
       bus.Q.value = 0.4;
       const drive = ctx.createWaveShaper();
       drive.curve = this.warmCurve();
@@ -473,18 +507,20 @@ export class Player {
           this.rhodes(ctx, bus, hz(m), at + (t - a0), b, Math.max(0.12, Math.min(1, vel)));
         };
         // How this chord is played: never the same way twice in a row.
-        const ways = ['up', 'up', 'down', 'together', 'split', 'outside-in'] as const;
+        const feel = o.keysFeel ?? 1;
+        // Sparse: only the gentlest ways of laying a chord down.
+        const ways: readonly string[] = feel <= 0 ? ['up', 'together', 'up', 'split'] : ['up', 'up', 'down', 'together', 'split', 'outside-in'];
         let way = ways[Math.floor(rnd() * ways.length)];
-        if (way === this.lastWay) way = ways[(ways.indexOf(way) + 2) % ways.length];
+        if (way === this.lastWay) way = ways[(ways.indexOf(way) + (feel <= 0 ? 1 : 2)) % ways.length];
         this.lastWay = way;
-        // How hard: mostly medium, sometimes a soft brush, now and then a firmer push.
+        // How hard: mostly medium, sometimes a soft brush, now and then a firmer push. Sparse = always soft.
         const r = rnd();
-        const force = r < 0.25 ? 0.62 + 0.1 * rnd() : r > 0.88 ? 1.08 : 0.82 + 0.16 * rnd();
+        const force = feel <= 0 ? 0.6 + 0.12 * rnd() : r < 0.25 ? 0.62 + 0.1 * rnd() : r > 0.88 ? 1.08 : 0.82 + 0.16 * rnd();
         // The whole hand lands a few ms late or early, like a person.
         const land = c.start + 0.012 + rnd() * 0.022;
         const n = c.voicing.length;
         const top = n - 1;
-        const gap = 0.026 + 0.04 * rnd();
+        const gap = feel <= 0 ? 0.05 + 0.04 * rnd() : 0.026 + 0.04 * rnd(); // sparse: a slower, lazier roll
         c.voicing.forEach((m, k) => {
           let when: number;
           if (way === 'up') when = k * gap;
@@ -495,12 +531,23 @@ export class Player {
           touch(m, land + when + rnd() * 0.008, force * ((k === top ? 0.66 : 0.52) + 0.2 * rnd()));
         });
         // On a long chord the hand sometimes comes back: a soft re-touch off the beat.
-        if (c.duration >= 3.2 * beat && rnd() < 0.6) {
+        if (feel <= 0) {
+          // Sparse: one touch and let it ring.
+        } else if (c.duration >= 3.2 * beat && rnd() < (feel >= 2 ? 1 : 0.6)) {
           const t2 = c.start + (rnd() < 0.5 ? 2.5 : 3) * beat + rnd() * 0.03;
           const again = rnd() < 0.5 ? c.voicing.slice(-2) : c.voicing.slice(1, 3);
           again.forEach((m, k) => touch(m, t2 + k * 0.03, force * (0.26 + 0.1 * rnd())));
-        } else if (c.duration >= 1.8 * beat && rnd() < 0.4) {
+        } else if (c.duration >= 1.8 * beat && rnd() < (feel >= 2 ? 0.9 : 0.4)) {
           touch(c.voicing[top], c.start + 1.5 * beat + rnd() * 0.03, force * 0.26);
+        }
+        if (feel >= 2) {
+          // Busier: single notes of the chord picked out between the beats, and the bass comes back halfway.
+          let slow = beat;
+          while (slow < 0.6) slow *= 2; // count in a relaxed pulse even when the take was read as fast
+          for (let k = 0.5; k * slow < c.duration - 0.2; k += 1) {
+            if (k === 0.5 || rnd() < 0.7) touch(c.voicing[Math.floor(rnd() * n)], c.start + k * slow + rnd() * 0.025, force * (0.22 + 0.12 * rnd()));
+          }
+          if (c.duration >= 3.2 * slow) touch(c.bass, c.start + 2 * slow + rnd() * 0.015, force * 0.6);
         }
         // The bass is the left hand of the same piano: it leads, then fades and wavers like every other note.
         touch(c.bass, c.start + rnd() * 0.01, force * (0.9 + 0.12 * rnd()));
@@ -531,6 +578,37 @@ export class Player {
           const e = k === hits.length - 1 ? b : at + (Math.min(b0, c.start + half) - a0);
           this.tone(ctx, ctx.destination, 'triangle', mtof(c.bass, o.backingTuningCents), s, e - 0.02, 0.32, 0.008, 0.08);
         });
+      }
+    }
+
+    if (o.comp?.length) {
+      // The montuno: the same electric piano, but bright, dry and stabbed short. The bass is its left hand, held.
+      const bus = ctx.createBiquadFilter();
+      bus.type = 'lowpass';
+      bus.frequency.value = o.keysTone ?? 5200;
+      bus.Q.value = 0.4;
+      const drive = ctx.createWaveShaper();
+      drive.curve = this.warmCurve();
+      drive.oversample = '2x';
+      const level = ctx.createGain();
+      level.gain.value = this.keysLevel() * 0.8;
+      const limit = ctx.createDynamicsCompressor();
+      limit.threshold.value = -8;
+      limit.knee.value = 6;
+      limit.ratio.value = 12;
+      limit.attack.value = 0.003;
+      limit.release.value = 0.15;
+      const verb = ctx.createConvolver();
+      verb.buffer = this.roomImpulse(ctx);
+      const wet = ctx.createGain();
+      wet.gain.value = 0.12;
+      bus.connect(drive).connect(level).connect(limit).connect(ctx.destination);
+      drive.connect(verb).connect(wet).connect(level);
+      for (const n of o.comp) {
+        if (n.start < a0 || n.start >= b0) continue;
+        const t = at + (n.start - a0) + Math.random() * 0.006;
+        const vel = Math.max(0.12, Math.min(1, n.velocity * (0.9 + 0.2 * Math.random())));
+        this.rhodes(ctx, bus, mtof(n.midi, o.backingTuningCents), t, t + n.duration, vel, n.bass ? 0.16 : 0.07);
       }
     }
 
@@ -628,10 +706,9 @@ export class Player {
    *  - a soft triangle underneath starts bright and closes, giving weight;
    *  - notes in the upper middle (where a pure tone bites the ear) are played softer.
    */
-  private rhodes(ctx: AudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number): void {
+  private rhodes(ctx: AudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number, release = 0.7): void {
     const balance = hz > 330 ? Math.pow(330 / hz, 0.45) : 1;
     const peak = 0.075 * vel * balance;
-    const release = 0.7;
     const hold = Math.max(start + 0.05, end);
     const stop = hold + release * 4;
     const env = ctx.createGain();
@@ -812,6 +889,79 @@ export class Player {
       n.start(when, Math.random() * 0.5);
       n.stop(when + (open ? 0.5 : 0.15));
       this.nodes.push(n);
+    }
+  }
+
+  /** One hit of the Latin percussion: clave, congas (open tone / slap), cáscara, shaker, bell, timbale. */
+  private latinDrum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
+    if (h.kind === 'kick' || h.kind === 'snare' || h.kind === 'hat' || h.kind === 'openhat') {
+      this.lofiDrum(ctx, dest, h, t);
+      return;
+    }
+    const v = h.velocity * (0.9 + 0.2 * Math.random());
+    const when = t + (Math.random() - 0.5) * 0.004;
+    /** A burst of filtered noise: [filter type, Hz, Q, level, attack s, decay time-constant s]. */
+    const burst = (type: BiquadFilterType, hz: number, q: number, level: number, attack: number, decay: number): void => {
+      const n = ctx.createBufferSource();
+      n.buffer = this.noiseBuffer(ctx);
+      const f = ctx.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = hz;
+      f.Q.value = q;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(level * v, when + attack);
+      g.gain.setTargetAtTime(0, when + attack, decay);
+      n.connect(f).connect(g).connect(dest);
+      n.start(when, Math.random() * 0.5);
+      n.stop(when + attack + decay * 7 + 0.02);
+      this.nodes.push(n);
+    };
+    /** A pitched knock: [wave, Hz at the hit, Hz it settles to, level, decay time-constant s]. */
+    const knock = (type: OscillatorType, hz: number, to: number, level: number, decay: number): void => {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.setValueAtTime(hz, when);
+      osc.frequency.exponentialRampToValueAtTime(to, when + 0.05);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, when);
+      g.gain.linearRampToValueAtTime(level * v, when + 0.002);
+      g.gain.setTargetAtTime(0, when + 0.004, decay);
+      osc.connect(g).connect(dest);
+      osc.start(when);
+      osc.stop(when + decay * 7 + 0.03);
+      this.nodes.push(osc);
+    };
+    if (h.kind === 'clave') {
+      knock('sine', 2500, 2450, 0.34, 0.022);
+      knock('triangle', 5000, 4900, 0.05, 0.008);
+    } else if (h.kind === 'conga') {
+      knock('sine', 245 + Math.random() * 6, 205, 0.6, 0.085);
+      burst('bandpass', 1300, 1.2, 0.12, 0.002, 0.012);
+    } else if (h.kind === 'slap') {
+      burst('bandpass', 1150, 1.6, 0.55, 0.001, 0.022);
+      knock('sine', 420, 340, 0.2, 0.02);
+    } else if (h.kind === 'shell') {
+      burst('bandpass', 3900, 3.5, 0.5, 0.001, 0.012);
+      knock('triangle', 1900, 1850, 0.07, 0.01);
+    } else if (h.kind === 'shaker') {
+      burst('highpass', 6500, 0.7, 0.11, 0.012, 0.022);
+    } else if (h.kind === 'cowbell') {
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 820;
+      band.Q.value = 2.2;
+      band.connect(dest);
+      const keep = dest;
+      dest = band;
+      knock('square', 545, 545, 0.16, 0.05);
+      knock('square', 815, 815, 0.16, 0.05);
+      dest = keep;
+    } else {
+      // timbale
+      knock('sine', 340, 300, 0.5, 0.11);
+      knock('sine', 610, 560, 0.14, 0.07);
+      burst('bandpass', 2600, 1, 0.3, 0.001, 0.018);
     }
   }
 

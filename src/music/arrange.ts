@@ -26,7 +26,19 @@ export function barStarts(g: GridSpec): number[] {
 
 // ---------------------------------------------------------------- drums
 
-export type DrumKind = 'kick' | 'snare' | 'hat' | 'openhat';
+export type DrumKind =
+  | 'kick'
+  | 'snare'
+  | 'hat'
+  | 'openhat'
+  // Latin percussion (phone page).
+  | 'clave'
+  | 'conga'
+  | 'slap'
+  | 'shell'
+  | 'shaker'
+  | 'cowbell'
+  | 'timbale';
 export type DrumPatternId = 'off' | 'rock' | 'halftime' | 'four' | 'ballad';
 
 export interface DrumHit {
@@ -533,13 +545,145 @@ function clashes(root: number, q: Quality, w: Float64Array, total: number): bool
   return false;
 }
 
-/** Spice the chords up: richer qualities by function, skipping colours the melody would rub against. */
-export function spiceChords(chords: Chord[], notes: Note[], key: { tonic: number; mode: Mode }, level: number, keep: Set<number> = new Set()): Chord[] {
+/** Small seeded random source (mulberry32): the same seed always gives the same chords. */
+function seeded(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type Pool = [quality: Quality, weight: number][];
+/** Colours to draw from, per family and spice level (1–3): a mix, not one extension for everything. */
+const COLOURS: Record<'maj' | 'min' | 'dom', Pool[]> = {
+  maj: [
+    [['maj', 2], ['add9', 2], ['maj7', 2], ['six', 1]],
+    [['maj7', 2], ['maj9', 2], ['add9', 2], ['six9', 1], ['six', 1]],
+    [['maj9', 3], ['six9', 2], ['maj7', 1], ['add9', 1]],
+  ],
+  min: [
+    [['min', 1], ['min7', 3], ['madd9', 1]],
+    [['min7', 2], ['min9', 2], ['madd9', 1], ['min11', 1]],
+    [['min11', 2], ['min9', 3], ['min7', 1], ['madd9', 1]],
+  ],
+  dom: [
+    [['dom7', 3], ['maj', 1]],
+    [['dom7', 1], ['dom9', 2], ['dom9sus4', 1]],
+    [['dom9sus4', 2], ['dom9', 2], ['dom7', 1]],
+  ],
+};
+
+/**
+ * Other chords that could stand where one is (offsets from the tonic): every 7th chord of
+ * the key, from level 2 the borrowed ones (bVII9, minor iv, bVImaj7) and a dominant leading
+ * into the chord that follows, and at the top level the tritone substitute of a dominant.
+ * Which of them is actually allowed is decided by the melody (see spiceChords).
+ */
+function standIns(deg: number, dominant: boolean, mode: Mode, level: number, nextDeg: number | null): { offset: number; quality: Quality }[] {
+  const out: { offset: number; quality: Quality }[] =
+    mode === 'major'
+      ? [
+          { offset: 0, quality: 'maj7' },
+          { offset: 2, quality: 'min7' },
+          { offset: 4, quality: 'min7' },
+          { offset: 5, quality: 'maj7' },
+          { offset: 7, quality: 'dom7' },
+          { offset: 9, quality: 'min7' },
+        ]
+      : [
+          { offset: 0, quality: 'min7' },
+          { offset: 3, quality: 'maj7' },
+          { offset: 5, quality: 'min7' },
+          { offset: 7, quality: 'dom7' },
+          { offset: 8, quality: 'maj7' },
+          { offset: 10, quality: 'dom7' },
+        ];
+  if (level >= 2) {
+    if (mode === 'major') out.push({ offset: 10, quality: 'dom9' }, { offset: 5, quality: 'madd9' }, { offset: 8, quality: 'maj7' });
+    else out.push({ offset: 1, quality: 'maj7' }, { offset: 5, quality: 'dom7' });
+    if (nextDeg !== null) out.push({ offset: (nextDeg + 7) % 12, quality: 'dom7' });
+  }
+  if (level >= 3 && dominant) out.push({ offset: (deg + 6) % 12, quality: 'dom7' });
+  return out.filter((x) => x.offset !== deg);
+}
+
+/** How much of the melody a chord carries, and how much sits a semitone above one of its tones. */
+function carries(root: number, q: Quality, w: Float64Array, total: number): { cover: number; rub: number } {
+  if (total <= 0) return { cover: 1, rub: 0 };
+  const tones = new Set(chordTones(root, q));
+  let cover = 0;
+  let rub = 0;
+  for (let pc = 0; pc < 12; pc++) {
+    if (tones.has(pc)) cover += w[pc];
+    else if (tones.has((pc + 11) % 12)) rub += w[pc];
+  }
+  return { cover: cover / total, rub: rub / total };
+}
+
+/**
+ * Spice the chords up, skipping colours the melody would rub against.
+ * Without a seed: one fixed colour per function and level (every dominant a 9th, and so on).
+ * With a seed: a mix. Each chord draws its own colour, neighbours avoid wearing the same one,
+ * and many chords are swapped for another that carries the melody just as well (more of them, and
+ * from further away, the higher the level).
+ * The first and last chord stay home. A new seed is a new take on the same progression.
+ */
+export function spiceChords(chords: Chord[], notes: Note[], key: { tonic: number; mode: Mode }, level: number, keep: Set<number> = new Set(), seed = 0): Chord[] {
+  if (!seed || level <= 0) {
+    return chords.map((c, i) => {
+      if (keep.has(i)) return c;
+      const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
+      const q = spiced(c.root, c.quality, key, level).find((x) => !clashes(c.root, x, w, total)) ?? c.quality;
+      return q === c.quality ? c : { ...c, quality: q, name: chordName(c.root, q, prefersSharps(key)) };
+    });
+  }
+  const lv = Math.min(3, Math.round(level));
+  const sharps = prefersSharps(key);
+  let last: { root: number; quality: Quality } | null = null;
   return chords.map((c, i) => {
-    if (keep.has(i)) return c;
-    const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
-    const q = spiced(c.root, c.quality, key, level).find((x) => !clashes(c.root, x, w, total)) ?? c.quality;
-    return q === c.quality ? c : { ...c, quality: q, name: chordName(c.root, q, prefersSharps(key)) };
+    const out = ((): Chord => {
+      if (keep.has(i) || c.quality === 'aug') return c;
+      const rnd = seeded(seed * 7919 + i * 104729 + lv * 31);
+      const { w, total } = melodyWeights(notes, c.start, c.start + c.duration);
+      const fam = baseQuality(c.quality);
+      const deg = (c.root - key.tonic + 12) % 12;
+      const dominant = fam === 'dom' || (fam === 'maj' && deg === 7);
+      // Often: another chord altogether, if it carries the melody as well as this one.
+      const edge = i === 0 || i === chords.length - 1;
+      let root = c.root;
+      let quality: Quality = c.quality;
+      let swapped = false;
+      if (!edge && rnd() < [0.35, 0.55, 0.75][lv - 1]) {
+        const own = carries(c.root, c.quality, w, total);
+        const next = chords[i + 1];
+        const options = standIns(deg, dominant, key.mode, lv, next ? (next.root - key.tonic + 12) % 12 : null).filter((x) => {
+          const r = (key.tonic + x.offset) % 12;
+          const fit = carries(r, x.quality, w, total);
+          return fit.cover >= own.cover - 0.1 && fit.rub < 0.1 && !clashes(r, x.quality, w, total) && r !== last?.root && r !== next?.root;
+        });
+        if (options.length) {
+          const x = options[Math.floor(rnd() * options.length)];
+          root = (key.tonic + x.offset) % 12;
+          quality = x.quality;
+          swapped = true;
+        }
+      }
+      const moved = (q: Quality): Chord => (swapped ? { ...c, root, quality: q, name: chordName(root, q, sharps), numeral: '' } : q === c.quality ? c : { ...c, quality: q, name: chordName(c.root, q, sharps) });
+      const nowFam = baseQuality(quality);
+      if (nowFam === 'sus' || quality === 'madd9') return moved(quality);
+      const nowDom = swapped ? nowFam === 'dom' : dominant;
+      // Its colour: drawn by weight; one that rubs the melody, or that the chord before already wears, is passed over.
+      const pool = COLOURS[nowDom ? 'dom' : nowFam === 'min' ? 'min' : 'maj'][lv - 1].map(([q, wt]) => ({ q, r: Math.pow(rnd(), 1 / wt) }));
+      pool.sort((x, y) => y.r - x.r);
+      const ok = pool.map((x) => x.q).filter((q) => !clashes(root, q, w, total));
+      return moved(ok.find((x) => x !== last?.quality) ?? ok[0] ?? quality);
+    })();
+    last = { root: out.root, quality: out.quality };
+    return out;
   });
 }
 

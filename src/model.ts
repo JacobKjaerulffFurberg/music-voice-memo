@@ -38,12 +38,21 @@ export interface StoredRecording {
   chordEdits?: Record<string, { root: number; quality: Quality }>;
   /** How spicy the chords are: 0 plain … 3 neo-soul. */
   spice?: number;
+  /** Magic wand: seed for which colours and stand-in chords the spice picks. A new number = a new take on the chords. */
+  wand?: number;
   /** How far the chords leave the key: 0 in key … 3 outside. */
   chroma?: number;
   /** Phone page: lo-fi drums on, with the recording slid and stretched onto their grid. */
   drums?: boolean;
   /** Phone page: chords play along (default on; false = off). */
   keys?: boolean;
+  /** Phone page: how much the drums / the piano do. 0 sparse · 1 normal (default) · 2 busy. */
+  drumFeel?: number;
+  keysFeel?: number;
+  /** Phone page: what kind of band plays along ('lofi' default, 'latin'). */
+  genre?: string;
+  /** Phone page: the vibe last picked (colours the app; see music/groove.ts). */
+  vibe?: string;
   /** Phone page: rain ambience. */
   rain?: boolean;
   /** Loop region (seconds) and whether looping is on. */

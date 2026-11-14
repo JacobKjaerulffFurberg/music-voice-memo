@@ -17,6 +17,56 @@
   color-scheme: dark;
 }
 
+/* Vibes: the same flat dark page, in three different rooms. */
+:root[data-vibe='cool'] {
+  --bg: #0b151d;
+  --surface: #12212d;
+  --surface-2: #1e3445;
+  --sheet: #12212d;
+  --muted: #7d93a4;
+  --accent: #3fb2e6;
+  --keys: #7cc4ee;
+  --note: #9fe0d4;
+  --line: #e6f2f7;
+  --play: #3fb2e6;
+}
+:root[data-vibe='hot'] {
+  --bg: #1f0e0a;
+  --surface: #2f1610;
+  --surface-2: #472118;
+  --sheet: #2f1610;
+  --muted: #a98b7f;
+  --accent: #ff5130;
+  --keys: #ff9057;
+  --note: #ffc640;
+  --line: #fbeade;
+  --play: #ff5130;
+  --cs: 1.2;
+}
+:root[data-vibe='dark'] {
+  --bg: #050506;
+  --surface: #0f0f12;
+  --surface-2: #1b1b21;
+  --sheet: #0f0f12;
+  --fg: #c9c7d1;
+  --muted: #62616f;
+  --accent: #7468b8;
+  --keys: #6f6b92;
+  --note: #8f8ba8;
+  --line: #bdbac8;
+  --play: #c9c7d1;
+  --cs: 0.35;
+}
+html,
+body,
+.m-dial,
+.m-track,
+.m-side,
+.m-play,
+.m-melody-wrap {
+  transition: background-color 250ms ease;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -194,20 +244,115 @@ button {
   min-height: 21px;
   text-align: center;
 }
-.m-bar {
+/* Loading: a tune writing itself. Notes wait as faint dots, hop in one by one, and the next one wiggles. */
+.m-load {
   align-self: center;
-  width: 200px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--surface-2);
-  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  height: 56px;
 }
-.m-bar i {
-  display: block;
-  width: 0;
-  height: 100%;
+.m-load i {
+  width: 16px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  transform: translateY(calc(-1 * var(--y)));
+}
+.m-load i.next {
+  animation: m-wiggle 420ms ease-in-out infinite alternate;
+}
+.m-load i.on {
+  background: var(--note);
+  animation: m-hop 380ms cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+.m-load i.on:nth-child(3n) {
+  background: var(--keys);
+}
+.m-load i.on:nth-child(4n + 1) {
+  background: var(--accent);
+}
+@keyframes m-wiggle {
+  from {
+    transform: translateY(calc(-1 * var(--y) + 3px)) rotate(-8deg);
+  }
+  to {
+    transform: translateY(calc(-1 * var(--y) - 5px)) rotate(8deg);
+  }
+}
+@keyframes m-hop {
+  0% {
+    transform: translateY(calc(-1 * var(--y) - 22px)) scale(0.6, 1.5);
+  }
+  60% {
+    transform: translateY(calc(-1 * var(--y) + 2px)) scale(1.25, 0.7);
+  }
+  100% {
+    transform: translateY(calc(-1 * var(--y)));
+  }
+}
+/* The wand: tap for a new take on the chords. */
+.m-wand {
+  color: var(--keys);
+}
+.m-wand svg {
+  width: 30px;
+  height: 30px;
+}
+.m-wand.lit {
+  background: color-mix(in srgb, var(--keys) 20%, var(--surface));
+}
+.m-wand {
+  position: relative;
+}
+.m-wand.spin {
+  animation: m-pop 420ms ease;
+}
+.m-wand.spin svg {
+  animation: m-wave 520ms ease;
+}
+@keyframes m-pop {
+  25% {
+    transform: scale(0.9);
+    background: color-mix(in srgb, var(--keys) 55%, var(--surface));
+  }
+  60% {
+    transform: scale(1.05);
+  }
+}
+@keyframes m-wave {
+  25% {
+    transform: rotate(-40deg) scale(1.25);
+  }
+  55% {
+    transform: rotate(24deg) scale(1.1);
+  }
+  80% {
+    transform: rotate(-8deg);
+  }
+}
+/* Sparks thrown by the wand: flat little squares, gone in a blink. */
+.m-spark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
   border-radius: 2px;
-  background: var(--fg);
+  background: var(--c);
+  pointer-events: none;
+  z-index: 5;
+  animation: m-spark 700ms cubic-bezier(0.15, 0.7, 0.3, 1) forwards;
+}
+@keyframes m-spark {
+  from {
+    transform: translate(-50%, -50%) scale(1.2);
+    opacity: 1;
+  }
+  to {
+    transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(0.2) rotate(200deg);
+    opacity: 0;
+  }
 }
 
 /* Result */
@@ -216,7 +361,7 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   padding-top: 4px;
 }
 .m-facts {
@@ -261,6 +406,75 @@ button {
   gap: 8px;
   flex: none;
 }
+/* Rows of small choices share one look: a quiet track with the picked one raised. */
+.m-track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 18px;
+  background: var(--surface);
+  flex: none;
+}
+.m-track > button {
+  height: 40px;
+  border-radius: 14px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition:
+    background-color 150ms,
+    color 150ms;
+}
+.m-track > button:active {
+  transform: scale(0.97);
+}
+/* Vibes: each word wears its own colour; the lit one is filled with it and colours the whole app. */
+.m-vibe i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--v);
+}
+.m-vibe[data-vibe='cool'] {
+  --v: #3fb2e6;
+}
+.m-vibe[data-vibe='hot'] {
+  --v: #ff5130;
+}
+.m-vibe[data-vibe='dark'] {
+  --v: #7468b8;
+}
+.m-track > .m-vibe[aria-pressed='true'] {
+  background: var(--v);
+  color: #0b0b0d;
+  font-weight: 600;
+}
+.m-vibe[aria-pressed='true'] i {
+  background: #0b0b0d;
+}
+/* Advanced: how much the drums / the piano do (one dot = super chill … three = busy), and the genre. */
+.m-feel svg {
+  width: 20px;
+  height: 20px;
+}
+.m-feel .m-pips i {
+  width: 7px;
+  height: 7px;
+}
+.m-feel .m-pips i.hot {
+  background: var(--note);
+}
+.m-track > #m-genre {
+  color: var(--fg);
+  background: var(--surface-2);
+}
 /* Drums / chords: icon-only on-off buttons. */
 .m-part {
   color: var(--muted);
@@ -274,8 +488,8 @@ button {
   background: color-mix(in srgb, var(--note) 18%, var(--surface));
 }
 .m-dial {
-  height: 68px;
-  border-radius: 22px;
+  height: 64px;
+  border-radius: 18px;
   background: var(--surface);
   display: flex;
   align-items: center;
@@ -330,7 +544,7 @@ button {
   position: relative;
   flex: 1;
   min-height: 180px;
-  border-radius: 24px;
+  border-radius: 22px;
   background: var(--surface);
   border: 1px solid var(--hair);
   overflow: hidden;
@@ -356,13 +570,13 @@ button {
 }
 .m-chord {
   flex: none;
-  min-width: 64px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  background: hsl(var(--h, 265) 32% 22%);
-  color: hsl(var(--h, 265) 80% 86%);
+  min-width: 60px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: hsl(var(--h, 265) calc(32% * var(--cs, 1)) 22%);
+  color: hsl(var(--h, 265) calc(80% * var(--cs, 1)) 86%);
   border: 1px solid var(--hair);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 500;
   text-align: center;
   transition:
@@ -371,29 +585,14 @@ button {
     box-shadow 120ms;
 }
 .m-chord.now {
-  background: hsl(var(--h, 265) 70% 74%);
+  background: hsl(var(--h, 265) calc(70% * var(--cs, 1)) 74%);
   border-color: transparent;
   color: var(--bg);
 }
 
-.m-toggles {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  flex: none;
-}
-.m-toggle {
-  height: 44px;
-  border-radius: 999px;
-  font-size: 14px;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid var(--hair);
-}
-.m-toggle[aria-pressed='true'] {
+.m-track > .m-toggle[aria-pressed='true'] {
   color: var(--fg);
   background: var(--surface-2);
-  border-color: transparent;
 }
 
 .m-controls {
@@ -404,8 +603,8 @@ button {
 }
 .m-side {
   justify-self: center;
-  width: 68px;
-  height: 68px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -439,10 +638,10 @@ button {
   opacity: 0.4;
 }
 .m-play {
-  width: 96px;
-  height: 96px;
+  width: 88px;
+  height: 88px;
   border-radius: 50%;
-  background: var(--fg);
+  background: var(--play, var(--fg));
   color: var(--bg);
   display: grid;
   place-items: center;

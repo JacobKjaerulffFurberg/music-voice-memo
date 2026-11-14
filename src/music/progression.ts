@@ -12,6 +12,8 @@ export interface TakeChordOptions {
   chordsPerBar: 1 | 2 | 'auto';
   /** Chord changes follow the sung note starts instead of the bar line. */
   floaty: boolean;
+  /** Seed for the varied chord colours (see spiceChords). Default: the take's own (`wand`), else none. */
+  seed?: number;
 }
 
 /** Stable id of a chord slot: its position in beats from bar 1 (survives re-voicing and floating). */
@@ -40,7 +42,7 @@ export function takeChords(rec: StoredRecording, s: Settings, o: TakeChordOption
     keep.add(i);
     return { ...c, slot, root: e.root, quality: e.quality, name: chordName(e.root, e.quality, prefersSharps(s.key)), numeral: '' };
   });
-  const spiced = s.key ? spiceChords(base, eff.notes, s.key, rec.spice ?? 0, keep) : base;
+  const spiced = s.key ? spiceChords(base, eff.notes, s.key, rec.spice ?? 0, keep, rec.wand ?? o.seed ?? 0) : base;
   // A sung take with a low voice gets the keys voiced a little higher, just above the voice.
   const voiced = revoice(spiced, played ? 0 : keysLift(eff.notes));
   return o.floaty && !played ? floatChords(voiced, eff.notes, (0.5 * 60) / s.bpm) : voiced;

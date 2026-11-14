@@ -215,8 +215,8 @@ export function lofiTempo(bpm: number): number {
  * singing leans on the drums' strong beats: phrase starts and long notes on
  * the kick (beat 1) and on beat 3, less on 2 and 4, least in between.
  */
-export function lofiDownbeat(notes: { start: number; duration: number }[], takeBpm: number, firstBeatSec: number): number {
-  const drumBeat = 60 / lofiTempo(takeBpm);
+export function lofiDownbeat(notes: { start: number; duration: number }[], takeBpm: number, firstBeatSec: number, drumBpm = lofiTempo(takeBpm)): number {
+  const drumBeat = 60 / drumBpm;
   const takeBeat = 60 / takeBpm;
   const bar = 4 * drumBeat;
   const options = Math.max(1, Math.round(bar / takeBeat));
@@ -249,8 +249,9 @@ export function lofiDownbeat(notes: { start: number; duration: number }[], takeB
 /**
  * A lazy lo-fi beat on the grid: swung 16ths, a soft kick with a ghost note,
  * the snare a hair late, quiet uneven hats. Covers [0, endSec).
+ * `feel`: 0 = super chill (half-time, almost nothing), 1 = the normal beat, 2 = busier (ghosts, fills).
  */
-export function lofiDrums(bpm: number, firstBeatSec: number, endSec: number, swing = 0.6): DrumHit[] {
+export function lofiDrums(bpm: number, firstBeatSec: number, endSec: number, feel = 1, swing = 0.6): DrumHit[] {
   const beat = 60 / bpm;
   const bar = 4 * beat;
   const step = beat / 4;
@@ -263,6 +264,14 @@ export function lofiDrums(bpm: number, firstBeatSec: number, endSec: number, swi
       const time = at(b, s) + late;
       if (time >= 0 && time < endSec) hits.push({ time, kind, velocity });
     };
+    if (feel <= 0) {
+      // Super chill: half-time. One kick, one soft snare far behind, a hat on each beat. Nothing else.
+      add('kick', 0, 0.9);
+      add('snare', 8, 0.6, 0.03);
+      for (let s = 0; s < 16; s += 4) add('hat', s, s === 0 ? 0.3 : 0.42);
+      if (odd) add('kick', 14, 0.35);
+      continue;
+    }
     add('kick', 0, 1);
     add('kick', odd ? 7 : 10, 0.7);
     if (odd) add('kick', 11, 0.45);
@@ -270,6 +279,19 @@ export function lofiDrums(bpm: number, firstBeatSec: number, endSec: number, swi
     add('snare', 12, 0.9, 0.026);
     for (let s = 0; s < 16; s += 2) add('hat', s, s % 4 === 0 ? 0.55 : 0.8);
     add('hat', odd ? 15 : 7, 0.35);
+    if (feel >= 2) {
+      // More going on: ghost snares, 16th hats in between, an open hat, and a little fill every fourth bar.
+      add('snare', 7, 0.22);
+      add('snare', odd ? 9 : 15, 0.2);
+      for (const g of odd ? [3, 9, 13] : [1, 5, 11]) add('hat', g, 0.3);
+      add('openhat', odd ? 6 : 14, 0.5);
+      add('kick', odd ? 3 : 6, 0.4);
+      if (((k % 4) + 4) % 4 === 3) {
+        add('snare', 13, 0.35);
+        add('snare', 14, 0.5);
+        add('snare', 15, 0.65);
+      }
+    }
   }
   return hits.sort((x, y) => x.time - y.time);
 }
