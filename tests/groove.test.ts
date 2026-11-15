@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Chord } from '../src/music/arrange';
-import { CLAVE, genreOf, grooveDrums, grooveTempo, latinDrums, montuno, VIBES, vibeOf } from '../src/music/groove';
+import { BOSSA, bossa, bossaDrums, CLAVE, DEFAULT_VIBE, dustOf, genreOf, grooveDrums, grooveTempo, latinDrums, montuno, pads, VIBES, vibeOf, wearVibe } from '../src/music/groove';
 import { lofiDrums } from '../src/music/lofi';
 
 const chord = (start: number, duration: number, root: number, voicing: number[]): Chord => ({
@@ -30,9 +30,19 @@ describe('groove: genres and vibes', () => {
   });
 
   it('every vibe is a full preset with a known genre', () => {
-    expect(VIBES.map((v) => v.id)).toEqual(['cool', 'hot', 'dark']);
-    expect(vibeOf({ vibe: 'hot' })?.genre).toBe('latin');
+    expect(VIBES.map((v) => v.id)).toEqual(['cool', 'soft', 'dream', 'dark']);
+    expect(vibeOf({ vibe: 'soft' })?.genre).toBe('bossa');
+    expect(vibeOf({ vibe: 'hot' })).toBeNull(); // gone: an old take that wore it just has no vibe
     expect(vibeOf({})).toBeNull();
+    // A new take starts cool, with everything the vibe decides written onto it.
+    const take: { vibe?: string; genre?: string; spice?: number; drums?: boolean; rain?: boolean } = {};
+    wearVibe(take, VIBES.find((v) => v.id === DEFAULT_VIBE)!);
+    expect(take).toMatchObject({ vibe: 'cool', genre: 'lofi', spice: 2, drums: true, rain: false });
+    // Dust: the take's own amount, else the vibe's, else a little.
+    expect(dustOf({ dust: 0.8, vibe: 'dark' })).toBe(0.8);
+    expect(dustOf({ vibe: 'dark' })).toBe(0.5);
+    expect(dustOf({})).toBe(0.3);
+    expect(dustOf({ dust: 0 })).toBe(0);
   });
 });
 
@@ -71,7 +81,7 @@ describe('groove: montuno', () => {
   it('plays beat 1, beat 2, then the off-beats, as short stabs', () => {
     const steps = [...new Set(piano.filter((n) => n.start < 2 - 1e-6).map((n) => Math.round(n.start / 0.125)))];
     expect(steps).toEqual([0, 2, 3, 5, 7, 9, 11, 13, 15]);
-    expect(piano.every((n) => n.duration < 0.125)).toBe(true);
+    expect(piano.every((n) => n.duration <= 0.2)).toBe(true);
     // Octaves on the outside.
     const first = piano.filter((n) => n.start === 0).map((n) => n.midi);
     expect(first).toEqual([60, 72]);
@@ -99,5 +109,51 @@ describe('groove: montuno', () => {
     expect(montuno(chords, 120, 0, 4, 2).length).toBeGreaterThan(notes.length);
     expect(montuno([], 120, 0, 4)).toEqual([]);
     expect(notes.every((n) => n.start >= 0 && n.start < 4)).toBe(true);
+  });
+});
+
+describe('groove: bossa and dream', () => {
+  const chords = [chord(0, 2, 0, [60, 64, 67]), chord(2, 2, 5, [60, 65, 69])];
+
+  it('bossa keeps the beat under a rim click on the bossa pattern', () => {
+    // 120 BPM: bar 2 s, 16th 0.125 s.
+    const hits = bossaDrums(120, 0, 2, 1);
+    expect(hits.filter((h) => h.kind === 'shell').map((h) => h.time)).toEqual(BOSSA.map((s) => s * 0.125));
+    const loud = hits.filter((h) => h.kind === 'kick' && h.velocity >= 0.4).map((h) => h.time);
+    expect(loud).toEqual([0, 0.5, 1, 1.5]);
+    expect(bossaDrums(120, 0, 8, 0).length).toBeLessThan(bossaDrums(120, 0, 8, 1).length);
+    expect(grooveDrums('bossa', 120, 0, 2, 1)).toEqual(hits);
+  });
+
+  it('the guitar plucks the chord that is sounding, with root and fifth under it', () => {
+    const notes = bossa(chords, 120, 0, 4, 1);
+    const bass = notes.filter((n) => n.bass);
+    expect(bass.map((n) => n.midi)).toEqual([36, 43, 36, 43, 41, 48, 41, 48]);
+    // Bar 2 plucks F (F A C), never C's E or G.
+    const bar2 = notes.filter((n) => !n.bass && n.start >= 2).map((n) => n.midi % 12);
+    expect(new Set(bar2)).toEqual(new Set([0, 5, 9]));
+    expect(bossa([], 120, 0, 4)).toEqual([]);
+  });
+
+  it('the sparse feel is a ballad: one string at a time in even 8ths, root on 1 and 3', () => {
+    const notes = bossa(chords, 120, 0, 4, 0);
+    const picked = notes.filter((n) => !n.bass && n.start < 2);
+    expect(picked.map((n) => Math.round(n.start / 0.125))).toEqual([2, 4, 6, 10, 12, 14]);
+    expect(picked.map((n) => n.midi)).toEqual([60, 64, 67, 64, 67, 64]);
+    expect(notes.filter((n) => n.bass).map((n) => n.midi)).toEqual([36, 36, 41, 41]);
+    expect(bossaDrums(120, 0, 2, 0).filter((h) => h.kind === 'kick').map((h) => h.time)).toEqual([0, 1]);
+  });
+
+  it('dream has no drums and holds each chord into the next', () => {
+    expect(grooveDrums('dream', 80, 0, 12, 2)).toEqual([]);
+    expect(grooveTempo('dream', 149)).toBe(74.5);
+    const p = pads(chords, 4, 0);
+    expect(p.filter((n) => n.start === 0).map((n) => n.midi)).toEqual([36, 60, 64, 67]);
+    expect(p.every((n) => n.duration > 2)).toBe(true);
+    expect(p.every((n) => n.duration < 2.5)).toBe(true); // and lets go soon after
+    // The normal feel adds weight underneath, nothing on top.
+    const more = pads(chords, 4, 1);
+    expect(more.length).toBe(p.length + 2);
+    expect(Math.max(...more.map((n) => n.midi))).toBe(69);
   });
 });

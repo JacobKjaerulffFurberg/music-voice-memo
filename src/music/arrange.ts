@@ -697,25 +697,25 @@ export const CHROMA_FIT_DISTANCE = [0.8, 0.65, 0.55, 0] as const;
 
 /**
  * Re-voice a progression for smooth voice leading (after edits / spice).
- * `lift` (see keysLift) slides the register up; at the full lift the bass goes up an octave too.
+ * `lift` (see keysLift) slides the register by semitones.
  */
 export function revoice(chords: Chord[], lift = 0): Chord[] {
   let prev: number[] | null = null;
   return chords.map((c) => {
     const voicing = voiceChord(c.root, c.quality, prev, lift);
     prev = voicing;
-    return { ...c, voicing, bass: 36 + c.root + (lift >= MAX_LIFT ? 12 : 0) };
+    return { ...c, voicing, bass: 36 + c.root };
   });
 }
 
-/** A fourth: enough to clear a low voice, while 9ths and 11ths stay below ~G5. */
-const MAX_LIFT = 5;
+/** As far down as close chords can go before the thirds at the bottom turn to mud. */
+const MAX_DROP = 3;
 
 /**
- * Semitones to slide the keys' register up so they sit just above a low voice
- * instead of inside it. The close voicings live around middle C (50–70): the
- * lower the voice is centred below D4, the more they rise, up to a fourth.
- * (A full octave put the extended chords far too high.)
+ * Semitones to slide the keys' register so they never sit high above the voice.
+ * The close voicings live around middle C (50–70). A voice centred on A3 or above
+ * leaves them there; a lower voice pulls them down with it, by up to a minor third.
+ * (Lifting them above a low voice, as this once did, left the keys floating far over the singing.)
  */
 export function keysLift(notes: Note[]): number {
   if (notes.length === 0) return 0;
@@ -724,7 +724,7 @@ export function keysLift(notes: Note[]): number {
   let acc = 0;
   for (const n of byPitch) {
     acc += n.duration;
-    if (acc >= half) return Math.max(0, Math.min(MAX_LIFT, 62 - n.midi));
+    if (acc >= half) return Math.max(-MAX_DROP, Math.min(0, n.midi - 57));
   }
   return 0;
 }

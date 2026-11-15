@@ -30,18 +30,30 @@
   --line: #e6f2f7;
   --play: #3fb2e6;
 }
-:root[data-vibe='hot'] {
-  --bg: #1f0e0a;
-  --surface: #2f1610;
-  --surface-2: #472118;
-  --sheet: #2f1610;
-  --muted: #a98b7f;
-  --accent: #ff5130;
-  --keys: #ff9057;
-  --note: #ffc640;
-  --line: #fbeade;
-  --play: #ff5130;
-  --cs: 1.2;
+:root[data-vibe='soft'] {
+  --bg: #17130e;
+  --surface: #221c15;
+  --surface-2: #342b1f;
+  --sheet: #221c15;
+  --muted: #9c8f7c;
+  --accent: #e0a45a;
+  --keys: #d9b48a;
+  --note: #b9d3a0;
+  --line: #f3ecdf;
+  --play: #e0a45a;
+  --cs: 0.9;
+}
+:root[data-vibe='dream'] {
+  --bg: #120e1c;
+  --surface: #1c162c;
+  --surface-2: #2c2346;
+  --sheet: #1c162c;
+  --muted: #8d84a8;
+  --accent: #c58bf0;
+  --keys: #b3a0f5;
+  --note: #f0a8d0;
+  --line: #efe9fb;
+  --play: #c58bf0;
 }
 :root[data-vibe='dark'] {
   --bg: #050506;
@@ -402,7 +414,7 @@ button {
 /* The two dials: big, the main things to play with after Play. */
 .m-dials {
   display: grid;
-  grid-template-columns: 1fr 1fr 2fr 2fr;
+  grid-template-columns: 1fr 1fr 2fr;
   gap: 8px;
   flex: none;
 }
@@ -437,19 +449,26 @@ button {
 }
 /* Vibes: each word wears its own colour; the lit one is filled with it and colours the whole app. */
 .m-vibe i {
-  width: 9px;
-  height: 9px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--v);
 }
 .m-vibe[data-vibe='cool'] {
   --v: #3fb2e6;
 }
-.m-vibe[data-vibe='hot'] {
-  --v: #ff5130;
-}
 .m-vibe[data-vibe='dark'] {
   --v: #7468b8;
+}
+.m-vibe[data-vibe='soft'] {
+  --v: #e0a45a;
+}
+.m-vibe[data-vibe='dream'] {
+  --v: #c58bf0;
+}
+.m-track > .m-vibe {
+  gap: 5px;
+  font-size: 13px;
 }
 .m-track > .m-vibe[aria-pressed='true'] {
   background: var(--v);
@@ -547,9 +566,9 @@ button {
   border-radius: 22px;
   background: var(--surface);
   border: 1px solid var(--hair);
-  overflow: hidden;
 }
 .m-melody {
+  border-radius: 22px;
   position: absolute;
   inset: 0;
   width: 100%;
@@ -833,4 +852,173 @@ button {
 }
 .m-pick:active {
   transform: scale(0.96);
+}
+
+/* The wand sits on the corner of the melody: it is about the chords up there. */
+.m-wand {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  display: grid;
+  place-items: center;
+  z-index: 2;
+}
+.m-wand svg {
+  width: 26px;
+  height: 26px;
+}
+.m-wand.lit {
+  background: color-mix(in srgb, var(--keys) 28%, var(--surface-2));
+}
+.m-wand:active {
+  transform: scale(0.94);
+}
+
+/* Sing over it: the mic. Lit while you sing; a dot underneath for every layer kept. */
+.m-layer {
+  position: relative;
+  color: var(--fg);
+}
+.m-layer svg {
+  width: 26px;
+  height: 26px;
+}
+.m-layer.on {
+  background: var(--accent);
+  color: var(--bg);
+  animation: m-breathe 1.4s ease-in-out infinite;
+}
+@keyframes m-breathe {
+  50% {
+    transform: scale(1.08);
+  }
+}
+.m-layer-n {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 7px;
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+}
+.m-layer-n i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.m-layer-n i.hot {
+  background: var(--note);
+}
+.m-layer.on .m-layer-n i {
+  background: var(--bg);
+}
+
+/* Sung layers: a chip each on the corner of the melody, in the colour of its line. Tap = remove. */
+.m-lays {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  z-index: 2;
+}
+.m-lay {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--c);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+.m-lay.off {
+  opacity: 0.35;
+}
+.m-lay:active,
+.m-lay-undo:active {
+  transform: scale(0.92);
+}
+.m-lay-undo {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 18px;
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Dust: a plain flat slider in the same track as the other small rows. */
+.m-dust {
+  grid-auto-flow: column;
+  grid-auto-columns: auto 1fr;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 16px;
+  height: 48px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.m-dust input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  background: transparent;
+  touch-action: pan-y;
+}
+.m-dust input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+.m-dust input::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+.m-dust input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -9px;
+  border-radius: 50%;
+  background: var(--note);
+  border: 0;
+}
+.m-dust input::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--note);
+  border: 0;
+}
+
+/* Export: a quiet word in the facts row; it pulses while the file is being made. */
+.m-exp {
+  align-items: center;
+  padding: 6px 12px;
+}
+.m-exp.busy {
+  pointer-events: none;
+  animation: m-busy 700ms ease-in-out infinite alternate;
+}
+@keyframes m-busy {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.3;
+  }
 }

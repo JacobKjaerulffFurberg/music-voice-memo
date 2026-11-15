@@ -3,9 +3,9 @@
  * stores so the recordings list never has to load audio.
  */
 
-import type { StoredRecording } from '../model';
+import type { Layer, StoredRecording } from '../model';
 
-export type RecordingMeta = Omit<StoredRecording, 'samples'> & { durationSec: number };
+export type RecordingMeta = Omit<StoredRecording, 'samples' | 'layers'> & { durationSec: number };
 
 const DB_NAME = 'music-voice-memo';
 const DB_VERSION = 1;
@@ -15,6 +15,7 @@ const AUDIO = 'audio';
 interface AudioRow {
   id: string;
   samples: Float32Array;
+  layers?: Layer[];
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -49,7 +50,8 @@ function request<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 function toMeta(rec: StoredRecording): RecordingMeta {
-  const { samples, ...rest } = rec;
+  const { samples, layers: _layers, ...rest } = rec;
+  void _layers;
   return { ...rest, durationSec: samples.length / rec.sampleRate };
 }
 
@@ -58,7 +60,9 @@ export async function saveRecording(rec: StoredRecording, includeAudio = true): 
   const tx = db.transaction(includeAudio ? [META, AUDIO] : [META], 'readwrite');
   tx.objectStore(META).put(toMeta(rec));
   if (includeAudio) {
-    const row: AudioRow = { id: rec.id, samples: rec.samples };
+    // A caller that knows nothing about layers (layers undefined) leaves the stored ones alone.
+    const kept = rec.layers ?? (await request(tx.objectStore(AUDIO).get(rec.id) as IDBRequest<AudioRow | undefined>))?.layers;
+    const row: AudioRow = { id: rec.id, samples: rec.samples, ...(kept?.length ? { layers: kept } : {}) };
     tx.objectStore(AUDIO).put(row);
   }
   await done(tx);
@@ -81,7 +85,7 @@ export async function loadRecording(id: string): Promise<StoredRecording | null>
   if (!meta || !audio) return null;
   const { durationSec: _d, ...rest } = meta;
   void _d;
-  return { ...rest, samples: audio.samples };
+  return { ...rest, samples: audio.samples, ...(audio.layers?.length ? { layers: audio.layers } : {}) };
 }
 
 export async function deleteRecording(id: string): Promise<void> {

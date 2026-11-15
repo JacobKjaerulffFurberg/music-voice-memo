@@ -20,6 +20,18 @@ export interface Overrides {
   tuningCents?: number;
 }
 
+/** Something sung over the take while it looped (phone page). */
+export interface Layer {
+  id: string;
+  samples: Float32Array;
+  sampleRate: number;
+  /** Where its first sample sits on the take's timeline as heard (seconds). It is one loop long. */
+  start: number;
+  muted?: boolean;
+  /** The pitch that was sung, for drawing it: take time (s) and pitch (MIDI, fractional). */
+  trail?: { t: number; m: number }[];
+}
+
 export interface StoredRecording {
   id: string;
   name: string;
@@ -53,6 +65,12 @@ export interface StoredRecording {
   genre?: string;
   /** Phone page: the vibe last picked (colours the app; see music/groove.ts). */
   vibe?: string;
+  /** Phone page: layers sung over the loop. Stored with the audio, not in the takes list. */
+  layers?: Layer[];
+  /** Phone page: dust, 0–1 (see Player). Unset = the vibe's amount. */
+  dust?: number;
+  /** Phone page: the voice is nudged onto its notes (see music/tune.ts). Derived on playback, never stored. */
+  tune?: boolean;
   /** Phone page: rain ambience. */
   rain?: boolean;
   /** Loop region (seconds) and whether looping is on. */

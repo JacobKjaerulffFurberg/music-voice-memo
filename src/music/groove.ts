@@ -12,14 +12,16 @@
 import { chordTones, type Chord, type DrumHit } from './arrange';
 import { lofiDrums, lofiTempo } from './lofi';
 
-export type Genre = 'lofi' | 'latin';
+export type Genre = 'lofi' | 'latin' | 'bossa' | 'dream';
 export const GENRES: { id: Genre; label: string }[] = [
   { id: 'lofi', label: 'Lo-fi' },
+  { id: 'bossa', label: 'Bossa' },
+  { id: 'dream', label: 'Dream' },
   { id: 'latin', label: 'Latin' },
 ];
 
 export function genreOf(rec: { genre?: string } | null | undefined): Genre {
-  return rec?.genre === 'latin' ? 'latin' : 'lofi';
+  return GENRES.find((g) => g.id === rec?.genre)?.id ?? 'lofi';
 }
 
 /**
@@ -28,6 +30,8 @@ export function genreOf(rec: { genre?: string } | null | undefined): Genre {
  * Picking one just writes these values onto the take; each can still be changed by hand.
  */
 export interface Vibe {
+  /** How worn it sounds, 0–1 (crackle, tape wobble, dull top, the band ducking under the kick). */
+  dust: number;
   /** How much room is put on the voice (reverb send, 0–1). */
   room: number;
   id: string;
@@ -41,27 +45,54 @@ export interface Vibe {
   chroma: number;
   /** How bright the keys are (low-pass, Hz). */
   tone: number;
-  /** Turn the drums on with it (a vibe that is nothing without them). */
-  drums?: boolean;
+  /** Drums on or off with it (on also slides the recording onto the grid). */
+  drums: boolean;
   /** Rain comes with it (and goes with the others). */
   rain?: boolean;
   /** Degrees of hue between neighbouring chords: small keeps every chord inside the vibe's own colours. */
   spread: number;
   /** How colourful the chords are drawn (1 = normal). */
   sat: number;
+  /** How dark the kit is, 0–1: muffled, tuned down, further back. Default 0: the kit as recorded. */
+  drumDark?: number;
+  /** An echo on the voice, 0–1: repeats that trail off into the room. Default 0. */
+  echo?: number;
+  /** How loud the band is next to the voice (1 = normal, the default). */
+  backing?: number;
 }
 
 export const VIBES: Vibe[] = [
-  // Airy and wide: lush chords, a relaxed beat, a clear piano that keeps moving.
-  { id: 'cool', label: 'Cool', hue: 200, genre: 'lofi', drumFeel: 1, keysFeel: 2, spice: 3, chroma: 0, tone: 3400, room: 0.14, spread: 9, sat: 1 },
-  // The band: salsa percussion wide open, a bright montuno, plain strong chords.
-  { id: 'hot', label: 'Hot', hue: 14, genre: 'latin', drumFeel: 1, keysFeel: 1, spice: 1, chroma: 0, tone: 5600, room: 0.05, drums: true, spread: 7, sat: 1.15 },
-  // Late night: half-time, one muffled touch per chord, chords that wander out of the key, rain, the voice far off in a big room.
-  { id: 'dark', label: 'Dark', hue: 258, genre: 'lofi', drumFeel: 0, keysFeel: 0, spice: 2, chroma: 2, tone: 1250, room: 0.38, rain: true, spread: 6, sat: 0.4 },
+  // Airy and wide: warm chords (7ths and 9ths, nothing clever), a relaxed beat, a clear piano that keeps moving.
+  { id: 'cool', dust: 0.35, label: 'Cool', hue: 200, genre: 'lofi', drumFeel: 1, keysFeel: 2, spice: 2, chroma: 0, tone: 3400, room: 0.14, drums: true, spread: 9, sat: 1, backing: 0.6 },
+  // Tender: a nylon guitar picking each chord one string at a time over brushes, the voice in a warm room.
+  { id: 'soft', dust: 0.3, label: 'Soft', hue: 36, genre: 'bossa', drumFeel: 0, keysFeel: 0, spice: 2, chroma: 0, tone: 2200, room: 0.22, drums: true, spread: 8, sat: 0.9 },
+  // Floating: no drums, slow pads, the voice free, echoing in a big space.
+  { id: 'dream', dust: 0.2, label: 'Dream', hue: 285, genre: 'dream', drumFeel: 0, keysFeel: 1, spice: 3, chroma: 0, tone: 1900, room: 0.5, drums: false, spread: 10, sat: 0.9, echo: 0.28 },
+  // Late night: half-time on a muffled, deep kit, one soft touch per chord, chords that wander out of the key, rain, the voice far off in a big room.
+  { id: 'dark', dust: 0.5, label: 'Dark', hue: 258, genre: 'lofi', drumFeel: 0, keysFeel: 0, spice: 2, chroma: 2, tone: 1250, room: 0.38, drums: true, rain: true, spread: 6, sat: 0.4, drumDark: 1 },
 ];
+
+/** The vibe a new take starts in. */
+export const DEFAULT_VIBE = 'cool';
 
 export function vibeOf(rec: { vibe?: string } | null | undefined): Vibe | null {
   return VIBES.find((v) => v.id === rec?.vibe) ?? null;
+}
+
+/** Put a vibe on a take: writes everything the vibe decides onto it. */
+export function wearVibe(
+  rec: { vibe?: string; genre?: string; drumFeel?: number; keysFeel?: number; spice?: number; chroma?: number; rain?: boolean; dust?: number; drums?: boolean },
+  v: Vibe,
+): void {
+  rec.vibe = v.id;
+  rec.genre = v.genre;
+  rec.drumFeel = v.drumFeel;
+  rec.keysFeel = v.keysFeel;
+  rec.spice = v.spice;
+  rec.chroma = v.chroma;
+  rec.rain = !!v.rain;
+  rec.dust = v.dust;
+  rec.drums = v.drums;
 }
 
 /**
@@ -70,7 +101,7 @@ export function vibeOf(rec: { vibe?: string } | null | undefined): Vibe | null {
  * singer feels, with the percussion filling in 16ths around it.
  */
 export function grooveTempo(genre: Genre, bpm: number): number {
-  if (genre !== 'latin') return lofiTempo(bpm);
+  if (genre === 'lofi' || genre === 'dream') return lofiTempo(bpm);
   let t = bpm;
   while (t >= 112) t /= 2;
   while (t < 56) t *= 2;
@@ -78,6 +109,8 @@ export function grooveTempo(genre: Genre, bpm: number): number {
 }
 
 export function grooveDrums(genre: Genre, bpm: number, firstBeatSec: number, endSec: number, feel = 1): DrumHit[] {
+  if (genre === 'dream') return [];
+  if (genre === 'bossa') return bossaDrums(bpm, firstBeatSec, endSec, feel);
   return genre === 'latin' ? latinDrums(bpm, firstBeatSec, endSec, feel) : lofiDrums(bpm, firstBeatSec, endSec, feel);
 }
 
@@ -105,19 +138,19 @@ export function latinDrums(bpm: number, firstBeatSec: number, endSec: number, fe
       const time = b + s * step;
       if (time >= 0 && time < endSec) hits.push({ time, kind, velocity });
     };
-    add('kick', 0, 0.85);
-    add('kick', 8, 0.6);
-    for (const s of CLAVE) add('clave', s, feel <= 0 ? 0.6 : 0.75);
+    add('kick', 0, 0.75);
+    add('kick', 8, 0.5);
+    for (const s of CLAVE) add('clave', s, feel <= 0 ? 0.45 : 0.55);
     // Conga tumbao, twice a bar: slap on 2, two open tones on 4 and 4-and.
     for (const h of [0, 8]) {
-      add('slap', h + 2, feel <= 0 ? 0.4 : 0.65);
+      add('slap', h + 2, feel <= 0 ? 0.3 : 0.45);
       add('conga', h + 6, feel <= 0 ? 0.5 : 0.8);
       add('conga', h + 7, feel <= 0 ? 0.4 : 0.65);
       if (feel >= 2) for (const s of [0, 1, 3, 4, 5]) add('conga', h + s, 0.14); // the quiet heel-toe in between
     }
     if (feel >= 1) {
-      for (let s = 0; s < 16; s += 4) add('cowbell', s, s % 8 === 0 ? 0.8 : 0.55);
-      for (let s = 0; s < 16; s += 2) add('shaker', s, s % 4 === 0 ? 0.6 : 0.35);
+      for (let s = 0; s < 16; s += 4) add('cowbell', s, s % 8 === 0 ? 0.5 : 0.32);
+      for (let s = 0; s < 16; s += 2) add('shaker', s, s % 4 === 0 ? 0.45 : 0.25);
     }
     if (feel >= 2) {
       // The band opens up: the stick on the shell, bell pairs between the beats, a soft kick pushing into 1 and 3.
@@ -177,14 +210,14 @@ export function montuno(chords: Chord[], bpm: number, firstBeatSec: number, endS
       const lo = 60 + pcs[0];
       const inside = pcs.slice(1).map((pc) => lo + ((pc - pcs[0] + 12) % 12));
       const outer = i % 2 === 0 || inside.length === 0;
-      const dur = step * 0.85;
+      const dur = step * (feel >= 2 ? 0.85 : 1.6);
       if (outer) {
-        const v = s === 0 ? 0.95 : 0.78;
+        const v = feel >= 2 ? (s === 0 ? 0.95 : 0.78) : s === 0 ? 0.7 : 0.55;
         put(lo, t, dur, v * 0.85);
         put(lo + 12, t, dur, v);
         if (feel >= 2) put(lo + 24, t, dur, v * 0.6);
       } else {
-        inside.slice(0, 3).forEach((m) => put(m, t, dur, 0.62));
+        inside.slice(0, 3).forEach((m) => put(m, t, dur, feel >= 2 ? 0.62 : 0.45));
       }
     });
     if (feel >= 2) {
@@ -213,4 +246,118 @@ export function montuno(chords: Chord[], bpm: number, firstBeatSec: number, endS
     }
   }
   return out.sort((x, y) => x.start - y.start);
+}
+
+// ---------------------------------------------------------------- bossa + dream
+
+/** The bossa rim click (and the guitar's chords with it), in 16ths of the groove bar. */
+export const BOSSA = [0, 3, 6, 10, 13];
+
+/**
+ * Bossa nova, played quietly: brushes stirring, a soft kick on the beat with a
+ * pickup before it, the rim click on the bossa pattern. Covers [0, endSec).
+ * `feel`: 0 = brushes and a kick on 1 and 3, nothing else · 1 = kick on every beat, + rim and kick pickups · 2 = + a low conga answering.
+ */
+export function bossaDrums(bpm: number, firstBeatSec: number, endSec: number, feel = 1): DrumHit[] {
+  const beat = 60 / bpm;
+  const bar = 4 * beat;
+  const step = beat / 4;
+  const hits: DrumHit[] = [];
+  for (let k = Math.floor((0 - firstBeatSec) / bar); firstBeatSec + k * bar < endSec; k++) {
+    const b = firstBeatSec + k * bar;
+    const add = (kind: DrumHit['kind'], s: number, velocity: number): void => {
+      const time = b + s * step;
+      if (time >= 0 && time < endSec) hits.push({ time, kind, velocity });
+    };
+    for (let s = 0; s < 16; s += feel <= 0 ? 2 : 1) add('shaker', s, s % 4 === 0 ? 0.42 : s % 2 === 0 ? 0.28 : 0.16);
+    if (feel <= 0) for (const s of [0, 8]) add('kick', s, s === 0 ? 0.5 : 0.4);
+    else for (let s = 0; s < 16; s += 4) add('kick', s, s % 8 === 0 ? 0.55 : 0.4);
+    if (feel >= 1) {
+      for (const s of [3, 7, 11, 15]) add('kick', s, 0.22);
+      for (const s of BOSSA) add('shell', s, 0.42);
+    }
+    if (feel >= 2) for (const s of [6, 7, 14]) add('conga', s, 0.3);
+  }
+  return hits.sort((x, y) => x.time - y.time);
+}
+
+function chordAtTime(chords: Chord[], t: number): Chord | null {
+  return chords.find((c) => t >= c.start - 1e-6 && t < c.start + c.duration - 1e-6) ?? null;
+}
+
+/**
+ * Bossa guitar over a chord progression: the thumb walks root and fifth on the
+ * beats, the fingers pluck the chord on the bossa pattern. Everything lands
+ * with the chord (nothing reaches ahead).
+ * `feel`: 0 = a ballad: root on 1 and 3, the chord picked one string at a time in even 8ths, left to ring ·
+ * 1 = the bossa pattern · 2 = + a pickup pluck.
+ */
+export function bossa(chords: Chord[], bpm: number, firstBeatSec: number, endSec: number, feel = 1): CompNote[] {
+  if (!chords.length) return [];
+  const beat = 60 / bpm;
+  const bar = 4 * beat;
+  const step = beat / 4;
+  const from = chords[0].start;
+  const last = chords[chords.length - 1];
+  const to = Math.min(endSec, last.start + last.duration);
+  const out: CompNote[] = [];
+  const put = (midi: number, start: number, duration: number, velocity: number, bass = false): void => {
+    if (start >= from - 1e-6 && start >= 0 && start < to) out.push({ midi, start, duration, velocity, ...(bass ? { bass } : {}) });
+  };
+  const plucks = feel <= 0 ? [] : feel >= 2 ? [...BOSSA, 15] : BOSSA;
+  /** The ballad: which of the top three strings (0 = lowest) is picked on each 8th between the bass notes. */
+  const ARP: [step: number, string: number][] = [[2, 0], [4, 1], [6, 2], [10, 1], [12, 2], [14, 1]];
+  for (let k = Math.floor((from - firstBeatSec) / bar); firstBeatSec + k * bar < to; k++) {
+    const b = firstBeatSec + k * bar;
+    if (feel <= 0) {
+      for (const [s, string] of ARP) {
+        const t = b + s * step;
+        const c = chordAtTime(chords, t);
+        if (!c) continue;
+        const top = c.voicing.slice(-3);
+        const i = Math.min(string, top.length - 1);
+        put(top[i], t, 5 * step, i === top.length - 1 ? 0.46 : 0.38);
+      }
+    }
+    for (const s of plucks) {
+      const t = b + s * step;
+      const c = chordAtTime(chords, t);
+      if (!c) continue;
+      // The fingers: the top three notes of the chord, the highest a touch louder.
+      const top = c.voicing.slice(-3);
+      top.forEach((m, i) => put(m, t + i * 0.008, 2.4 * step, (s === 0 ? 0.6 : 0.48) + (i === top.length - 1 ? 0.08 : 0)));
+    }
+    for (const s of feel <= 0 ? [0, 8] : [0, 4, 8, 12]) {
+      const t = b + s * step;
+      const c = chordAtTime(chords, t);
+      if (!c) continue;
+      const has5 = chordTones(c.root, c.quality).includes((c.root + 7) % 12);
+      const fifth = !has5 ? c.bass : c.bass + 7 > 55 ? c.bass - 5 : c.bass + 7;
+      put(s % 8 === 0 ? c.bass : fifth, t, 3.6 * step, s % 8 === 0 ? 0.75 : 0.55, true);
+    }
+  }
+  return out.sort((x, y) => x.start - y.start);
+}
+
+/**
+ * Dream: every chord as one long held pad that fades into the next. No rhythm at all.
+ * `feel`: 0 = the chord · 1 = + the fifth over the bass · 2 = + its top note an octave up, far away.
+ * Each pad lets go soon after the next one starts (a short overlap, not a wash).
+ */
+export function pads(chords: Chord[], endSec: number, feel = 1): CompNote[] {
+  const out: CompNote[] = [];
+  for (const c of chords) {
+    if (c.start >= endSec) continue;
+    const duration = Math.min(endSec, c.start + c.duration) - c.start + 0.3; // overlaps the next one
+    out.push({ midi: c.bass, start: c.start, duration, velocity: 0.6, bass: true });
+    c.voicing.forEach((m) => out.push({ midi: m, start: c.start, duration, velocity: 0.5 }));
+    if (feel >= 1) out.push({ midi: c.bass + 7, start: c.start, duration, velocity: 0.35, bass: true });
+    if (feel >= 2) out.push({ midi: c.voicing[c.voicing.length - 1] + 12, start: c.start, duration, velocity: 0.22 });
+  }
+  return out;
+}
+
+/** How much dust a take has: its own setting, else its vibe's, else a little (it is a lo-fi app). */
+export function dustOf(rec: { dust?: number; vibe?: string } | null | undefined): number {
+  return Math.max(0, Math.min(1, rec?.dust ?? vibeOf(rec)?.dust ?? 0.3));
 }

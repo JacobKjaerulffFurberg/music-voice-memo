@@ -190,22 +190,23 @@ it('with a seed, mixes the colours instead of one extension for all', () => {
     expect(flavours(5, 'maj').map((c) => c.name)).toContain('Fmaj9');
   });
 
-  it('voices the keys just above a low voice, never sky-high', () => {
-    expect(keysLift([n(50, 0), n(52, 1), n(55, 2), n(62, 3)])).toBe(5); // centred around D3–G3
-    expect(keysLift([n(57, 0), n(59, 1), n(60, 2), n(62, 3)])).toBe(3); // centred on B3: a little
-    expect(keysLift([n(62, 0), n(64, 1), n(67, 2), n(55, 3)])).toBe(0); // centred on D4 or above
+  it('keeps the keys down with a low voice, never above it', () => {
+    expect(keysLift([n(50, 0), n(52, 1), n(55, 2), n(62, 3)])).toBe(-3); // centred around D3–G3: as low as they go
+    expect(keysLift([n(55, 0), n(56, 1), n(57, 2), n(62, 3)])).toBe(-1); // centred on G#3: a little
+    expect(keysLift([n(57, 0), n(59, 1), n(60, 2), n(62, 3)])).toBe(0); // centred on A3 or above: where they are
+    expect(keysLift([n(62, 0), n(64, 1), n(67, 2), n(72, 3)])).toBe(0); // a high voice never lifts them
     expect(keysLift([])).toBe(0);
     const base = suggestChords([n(48, 0, 4)], { tonic: 0, mode: 'major' }, { ...g, durationSec: 2.5 });
-    const [c] = revoice(base, 5);
-    expect(Math.min(...c.voicing)).toBeGreaterThanOrEqual(55);
-    expect(Math.max(...c.voicing)).toBeLessThanOrEqual(75);
-    expect(c.bass).toBe(48);
-    // Extended chords on every root stay at or below G#5 and above the voice.
+    const [c] = revoice(base, -3);
+    expect(Math.min(...c.voicing)).toBeGreaterThanOrEqual(47);
+    expect(Math.max(...c.voicing)).toBeLessThanOrEqual(67);
+    expect(c.bass).toBe(36);
+    // Extended chords on every root stay at or below C5.
     for (let root = 0; root < 12; root++) {
       for (const quality of ['min11', 'maj9', 'dom9sus4', 'six9'] as const) {
-        const [x] = revoice([{ ...c, root, quality }], 5);
-        expect(Math.max(...x.voicing)).toBeLessThanOrEqual(80);
-        expect(Math.min(...x.voicing)).toBeGreaterThanOrEqual(55);
+        const [x] = revoice([{ ...c, root, quality }], -3);
+        expect(Math.max(...x.voicing)).toBeLessThanOrEqual(72);
+        expect(Math.min(...x.voicing)).toBeGreaterThanOrEqual(47);
       }
     }
   });

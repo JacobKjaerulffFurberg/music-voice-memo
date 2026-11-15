@@ -13,15 +13,21 @@ import { hzToMidi, keyName, noteName, scalePitchClasses } from '../analysis/musi
 import { fitGridAtBpm, onsetsFromNotes } from '../analysis/tempo';
 import type { Note } from '../analysis/types';
 import { micPermissionGranted, Recorder } from '../audio/recorder';
-import { effectiveAnalysis, effectiveSettings, newId, type Settings, type StoredRecording } from '../model';
+import { effectiveAnalysis, effectiveSettings, newId, type Layer, type Settings, type StoredRecording } from '../model';
 import { chordChoices, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
-import { GENRES, genreOf, grooveDrums, grooveTempo, montuno, VIBES, vibeOf } from '../music/groove';
+import { bossa, DEFAULT_VIBE, dustOf, GENRES, genreOf, grooveDrums, grooveTempo, montuno, pads, VIBES, vibeOf, wearVibe } from '../music/groove';
+import { foldOntoLoop, roughLevel } from '../music/layers';
 import { alignToGrid, lofiDownbeat } from '../music/lofi';
 import { takeChords } from '../music/progression';
 import type { Mode } from '../analysis/types';
 import { velocityOf } from '../analysis/velocity';
 import { deleteRecording, listRecordings, loadRecording, saveRecording } from '../storage/db';
-import { Player } from './player';
+import { Player, type PlayOptions } from './player';
+import { tuneVoice } from '../music/tune';
+import { encodeMp3, fileName, handOver } from '../export/mp3';
+
+/** Colours of the sung layers' lines and chips, in order. */
+const LAYER_COLOURS = ['--accent', '--keys', '--note'];
 
 /** The loading tune: how high each of its notes sits (px above the line). */
 const LOAD_TUNE = [0, 8, 16, 8, 20, 12, 4, 14, 24, 10];
@@ -39,6 +45,7 @@ const ICON = {
   keys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 13v6M15 13v6"/><path d="M7.5 5v8h3V5M13.5 5v8h3V5"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
   wand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
 
@@ -65,17 +72,19 @@ const TEMPLATE = `
       <button class="m-fact" id="m-key-fact" aria-label="Change the key"><b id="m-key">—</b><span id="m-mode">key</span></button>
       <button class="m-fact" id="m-bpm-fact" aria-label="Halve or double the tempo"><b id="m-bpm">—</b><span>bpm</span></button>
       <button class="m-fact m-enh" id="m-enhance" aria-label="Enhance: slower, more careful analysis">✦</button>
+      <button class="m-fact m-exp" id="m-export" aria-label="Export as MP3"><span>MP3</span></button>
       <a class="m-fact m-daw" href="./" aria-label="Open the full editor"><span>DAW</span></a>
     </div>
     <div class="m-melody-wrap">
       <canvas class="m-melody" id="m-melody"></canvas>
+      <div class="m-lays" id="m-lays"></div>
+      <button class="m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
     </div>
     <div class="m-chords m-more" id="m-chords"></div>
     <div class="m-track" id="m-vibes">${VIBES.map((v) => `<button class="m-vibe" data-vibe="${v.id}" aria-pressed="false"><i></i>${v.label}</button>`).join('')}</div>
-    <div class="m-dials">
+    <div class="m-dials m-more">
       <button class="m-dial m-part" id="m-drums" aria-label="Drums" aria-pressed="false">${ICON.drums}</button>
       <button class="m-dial m-part" id="m-chordsbtn" aria-label="Chords" aria-pressed="true">${ICON.keys}</button>
-      <button class="m-dial m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
       <button class="m-dial" id="m-spice" aria-label="Spice up the chords"><span class="m-peppers" id="m-peppers"></span></button>
     </div>
     <div class="m-track m-more">
@@ -85,13 +94,17 @@ const TEMPLATE = `
     </div>
     <div class="m-track m-more">
       <button class="m-toggle" id="t-voice" aria-pressed="true">Voice</button>
+      <button class="m-toggle" id="t-tune" aria-pressed="false" aria-label="Tune the voice onto its notes">Tune</button>
       <button class="m-toggle" id="t-melody" aria-pressed="false">Melody</button>
       <button class="m-toggle" id="t-rain" aria-pressed="false">Rain</button>
+      <button class="m-toggle" id="t-loop" aria-pressed="true">Loop</button>
     </div>
+    <label class="m-track m-more m-dust"><span>Dust</span><input type="range" id="m-dust" min="0" max="100" step="1" aria-label="Dust"></label>
+    <div class="m-track m-more" id="m-layers" hidden></div>
     <div class="m-controls">
       <button class="m-side rec" id="m-new" aria-label="Record a new idea"><span></span></button>
       <button class="m-play" id="m-play" aria-label="Play">${ICON.play}</button>
-      <button class="m-side m-loop" id="t-loop" aria-label="Loop" aria-pressed="false">${ICON.loop}</button>
+      <button class="m-side m-layer" id="m-layer" aria-label="Sing over it">${ICON.mic}<span class="m-layer-n" id="m-layer-n"></span></button>
     </div>
   </section>
 
@@ -173,6 +186,10 @@ export function mountMobile(root: HTMLElement): void {
   let cue = 0;
   let recStart = 0;
   let starting = false;
+  /** Singing over the loop right now: the looped span, where playback was when the mic started, and the round-trip delay. */
+  let layering: { lp: [number, number]; p0: number; lat: number } | null = null;
+  /** The live pitch line while singing over: where on the take, which pitch, when. */
+  const jam: { t: number; m: number; at: number }[] = [];
   /** The note whose name is shown for a moment (tapped or being dragged). */
   let tapInfo: { i: number; midi: number; until: number } | null = null;
 
@@ -244,25 +261,37 @@ export function mountMobile(root: HTMLElement): void {
     if (!current || !v) return;
     if (current.vibe === v.id) delete current.vibe;
     else {
-      current.vibe = v.id;
-      current.genre = v.genre;
-      current.drumFeel = v.drumFeel;
-      current.keysFeel = v.keysFeel;
-      current.spice = v.spice;
-      current.chroma = v.chroma;
-      current.rain = !!v.rain;
-      if (v.drums && !drumsOn()) {
-        current.drums = true;
-        cue = 0; // the recording moved onto the grid
+      const moved = v.drums !== drumsOn();
+      wearVibe(current, v);
+      if (moved) {
+        cue = 0; // the recording moved onto / off the grid
         if (!player.playing) player.seek(0);
       }
     }
     refresh();
   });
 
+// Dust: one slider for how worn it all sounds. Heard as you drag.
+  const dustEl = $<HTMLInputElement>('m-dust');
+  dustEl.addEventListener('input', () => {
+    if (!current) return;
+    current.dust = Number(dustEl.value) / 100;
+    player.setDust(current.dust);
+  });
+  dustEl.addEventListener('change', () => {
+    if (current) void saveRecording(current, false).catch(() => undefined);
+  });
+
   rainBtn.addEventListener('click', () => {
     if (!current) return;
     current.rain = !rainOn();
+    refresh();
+  });
+  // Tune: the voice nudged onto its notes, per take.
+  const tuneBtn = $<HTMLButtonElement>('t-tune');
+  tuneBtn.addEventListener('click', () => {
+    if (!current) return;
+    current.tune = !current.tune;
     refresh();
   });
 
@@ -392,6 +421,13 @@ export function mountMobile(root: HTMLElement): void {
 
   const liveState = newLiveState();
   setInterval(() => {
+    if (layering && view === 'result') {
+      const spec = recorder.readSpectrum();
+      if (!spec) return;
+      const g = liveGuess(spec.mags, spec.sampleRate, spec.fftSize, spec.rms, liveState);
+      if (g.kind === 'note' && g.notes.length) jam.push({ t: player.position - layering.lat, m: g.notes[0] + (g.cents ?? 0) / 100, at: performance.now() });
+      return;
+    }
     if (view === 'recording') {
       timer.textContent = fmt((performance.now() - recStart) / 1000);
       const spec = recorder.readSpectrum();
@@ -405,6 +441,7 @@ export function mountMobile(root: HTMLElement): void {
 
   async function toggleRecord(): Promise<void> {
     if (starting || view === 'analyzing') return;
+    if (layering) await finishLayer(false);
     if (!recorder.isRecording) {
       starting = true;
       stopPlayback();
@@ -440,6 +477,12 @@ export function mountMobile(root: HTMLElement): void {
       analysis: null,
       overrides: {},
     };
+    // Every new idea starts cool.
+    const start = VIBES.find((v) => v.id === DEFAULT_VIBE);
+    if (start) {
+      wearVibe(current, start);
+      paint(start.id);
+    }
     await saveRecording(current).catch(() => undefined);
     await analyze('normal');
   }
@@ -474,17 +517,40 @@ export function mountMobile(root: HTMLElement): void {
         d.classList.toggle('next', k === done);
       });
     }, 50);
-    const onStage = (stage: string): void => {
-      const s = STAGES.find(([m]) => stage.includes(m));
-      if (!s) return;
+    // Every step gets its moment on screen, however fast the work behind it went:
+    // steps queue up and each is shown for at least STEP_MS before the next.
+    const STEP_MS = 850;
+    const queue: (typeof STAGES)[number][] = [];
+    let showing = false;
+    let idle: (() => void) | null = null;
+    const next = (): void => {
+      const s = queue.shift();
+      if (!s) {
+        showing = false;
+        idle?.();
+        return;
+      }
+      showing = true;
       at = Math.max(at, upTo * 0.9); // the stage before is done
       upTo = Math.max(upTo, s[2]);
       hint.textContent = s[1][Math.floor(Math.random() * s[1].length)];
+      setTimeout(next, STEP_MS);
+    };
+    const onStage = (stage: string): void => {
+      const s = STAGES.find(([m]) => stage.includes(m));
+      if (!s || queue.includes(s)) return;
+      queue.push(s);
+      if (!showing) next();
     };
     try {
       rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, 'auto', onStage, rec.source ?? 'auto', quality);
       delete rec.editedNotes;
       await saveRecording(rec, false).catch(() => undefined);
+      // Let the steps still waiting have their turn, then the last notes of the tune land.
+      if (showing) await new Promise<void>((r) => (idle = r));
+      upTo = 1.05;
+      at = Math.max(at, 0.9);
+      await new Promise((r) => setTimeout(r, 450));
       cue = 0;
       player.seek(0);
       setView('result');
@@ -549,7 +615,7 @@ export function mountMobile(root: HTMLElement): void {
   function computeChords(s: Settings): Chord[] {
     const r = take();
     // Lo-fi keys drift with the singing; a Latin band changes chords on the grid.
-    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: genreOf(current) !== 'latin', seed: 1 }) : [];
+    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: genreOf(current) === 'lofi' || genreOf(current) === 'dream', seed: 1 }) : [];
   }
 
   /**
@@ -591,7 +657,17 @@ export function mountMobile(root: HTMLElement): void {
     drumsBtn.setAttribute('aria-pressed', String(drumsOn()));
     keysBtn.setAttribute('aria-pressed', String(keysOn()));
     rainBtn.setAttribute('aria-pressed', String(rainOn()));
+    tuneBtn.setAttribute('aria-pressed', String(!!current?.tune));
     paint(vibeOf(current)?.id);
+    dustEl.value = String(Math.round(dustOf(current) * 100));
+    const layers = current?.layers ?? [];
+    $<HTMLElement>('m-layer-n').innerHTML = layers.slice(0, 5).map((l) => `<i class="${l.muted ? '' : 'hot'}"></i>`).join('');
+// Each layer is a small chip on the melody in the colour of its line: tap it and the layer is gone (Undo brings it back).
+    laysEl.innerHTML =
+      layers.map((l, i) => `<button class="m-lay${l.muted ? ' off' : ''}" data-i="${i}" style="--c:var(${LAYER_COLOURS[i % LAYER_COLOURS.length]})" aria-label="Remove layer ${i + 1}">✕</button>`).join('') +
+      (gone ? '<button class="m-lay-undo" data-undo>Undo</button>' : '');
+    layersEl.hidden = layers.length === 0;
+    layersEl.innerHTML = layers.map((l, i) => `<button class="m-toggle" data-layer="${i}" aria-pressed="${!l.muted}" aria-label="Layer ${i + 1}">${i + 1}</button>`).join('') + '<button class="m-toggle" data-undo>Undo</button>';
     const genre = GENRES.find((g) => g.id === genreOf(current)) ?? GENRES[0];
     $<HTMLElement>('m-genre').textContent = genre.label;
     $<HTMLElement>('m-genre').setAttribute('aria-label', `Genre: ${genre.label}`);
@@ -879,7 +955,7 @@ export function mountMobile(root: HTMLElement): void {
   function colors(): Record<string, string> {
     const cs = getComputedStyle(root);
     const v = (n: string): string => cs.getPropertyValue(n).trim();
-    return { fg: v('--fg'), muted: v('--muted'), faint: v('--faint'), accent: v('--accent'), note: v('--note'), line: v('--line') };
+    return { fg: v('--fg'), muted: v('--muted'), faint: v('--faint'), accent: v('--accent'), note: v('--note'), line: v('--line'), keys: v('--keys') };
   }
 
   function geometry(): { W: number; H: number; x: (t: number) => number; t: (x: number) => number; y: (m: number) => number; lo: number; hi: number; top: number } {
@@ -1034,6 +1110,58 @@ export function mountMobile(root: HTMLElement): void {
     c.stroke();
     c.globalAlpha = 1;
 
+    // What was sung over it: one line per layer, in the colour of its chip.
+    (current?.layers ?? []).forEach((l, li) => {
+      if (!l.trail?.length) return;
+      c.strokeStyle = [col.accent, col.keys, col.note][li % 3];
+      c.lineWidth = 2.5;
+      c.lineJoin = 'round';
+      c.lineCap = 'round';
+      c.globalAlpha = l.muted ? 0.2 : 0.85;
+      c.beginPath();
+      let prev: { t: number; m: number } | null = null;
+      for (const p of l.trail) {
+        if (p.m < g.lo - 1 || p.m > g.hi + 1) {
+          prev = null;
+          continue;
+        }
+        if (prev && p.t - prev.t < 0.3 && Math.abs(p.m - prev.m) < 2.5) c.lineTo(g.x(p.t), g.y(p.m));
+        else {
+          c.moveTo(g.x(p.t) - 0.1, g.y(p.m));
+          c.lineTo(g.x(p.t), g.y(p.m));
+        }
+        prev = p;
+      }
+      c.stroke();
+      c.globalAlpha = 1;
+    });
+
+    // Singing over it: your pitch right now, as a line that fades behind you.
+    if (layering && jam.length) {
+      const nowMs = performance.now();
+      const keep = (layering.lp[1] - layering.lp[0]) * 1000;
+      while (jam.length && nowMs - jam[0].at > keep) jam.shift();
+      c.strokeStyle = col.accent;
+      c.lineWidth = 3;
+      c.lineJoin = 'round';
+      c.lineCap = 'round';
+      let prev: { t: number; m: number; at: number } | null = null;
+      for (const p of jam) {
+        if (p.m < g.lo - 1 || p.m > g.hi + 1) {
+          prev = null;
+          continue;
+        }
+        c.globalAlpha = Math.max(0.15, 1 - (nowMs - p.at) / keep);
+        c.beginPath();
+        if (prev && p.t > prev.t && p.t - prev.t < 0.3 && Math.abs(p.m - prev.m) < 2.5) c.moveTo(g.x(prev.t), g.y(prev.m));
+        else c.moveTo(g.x(p.t) - 0.1, g.y(p.m));
+        c.lineTo(g.x(p.t), g.y(p.m));
+        c.stroke();
+        prev = p;
+      }
+      c.globalAlpha = 1;
+    }
+
     // Loop on: what lies outside the looped bars is dimmed.
     const lp = on(toggles.loop) ? loopSpan() : null;
     if (lp) {
@@ -1187,11 +1315,20 @@ export function mountMobile(root: HTMLElement): void {
     }
   }
 
-  async function startPlayback(from: number): Promise<void> {
+  /** The voice as it is heard: the take, or with Tune on the take with every note nudged onto its pitch. */
+  let tuned: { key: string; from: Float32Array; samples: Float32Array } | null = null;
+  function voiceOf(rec: StoredRecording, s: Settings): Float32Array {
+    if (!current?.tune || shown.length === 0) return rec.samples;
+    const key = `${s.tuningCents}|${shown.map((n) => `${n.start.toFixed(3)},${n.duration.toFixed(3)},${n.midi},${n.hz.toFixed(2)}`).join(';')}`;
+    if (tuned?.from !== rec.samples || tuned.key !== key) tuned = { key, from: rec.samples, samples: tuneVoice(rec.samples, rec.sampleRate, shown, s.tuningCents) };
+    return tuned.samples;
+  }
+
+  /** Everything the player needs to play (or render) the take from `from`, looping `lp` if given. */
+  function playOptions(from: number, lp: [number, number] | null): { samples: Float32Array; sampleRate: number; o: PlayOptions } | null {
     const s = settings();
     const rec = take();
-    if (!current || !rec || !s) return;
-    const lp = on(toggles.loop) ? loopSpan() : null;
+    if (!current || !rec || !s) return null;
     const last = chords[chords.length - 1];
     const backing = lp && last && last.start + last.duration < lp[1] ? [...chords.slice(0, -1), { ...last, duration: lp[1] - last.start }] : chords;
     // The band: its own (slow) bar on the take's grid, starting where the singing leans on it.
@@ -1199,8 +1336,7 @@ export function mountMobile(root: HTMLElement): void {
     const gBpm = grooveTempo(genre, s.bpm);
     const gFirst = lofiDownbeat(shown, s.bpm, s.firstBeatMs / 1000, gBpm);
     const end = lp ? lp[1] : rec.samples.length / rec.sampleRate;
-    const latin = genre === 'latin';
-    await player.play(rec.samples, rec.sampleRate, {
+    const o: PlayOptions = {
       from,
       click: false,
       voice: on(toggles.voice),
@@ -1214,22 +1350,71 @@ export function mountMobile(root: HTMLElement): void {
       notesTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       notesGain: on(toggles.voice) ? 0.16 : 0.28,
       drums: drumsOn() ? grooveDrums(genre, gBpm, gFirst, end, feelOf(current.drumFeel)) : [],
-      drumStyle: latin ? 'latin' : 'lofi',
+      drumStyle: genre === 'lofi' ? 'lofi' : 'latin',
       rain: rainOn(),
       keysFeel: feelOf(current.keysFeel),
-      chords: keysOn() && !latin ? backing : [],
-      comp: keysOn() && latin ? montuno(backing, gBpm, gFirst, end, feelOf(current.keysFeel)) : [],
+      chords: keysOn() && genre === 'lofi' ? backing : [],
+      comp: !keysOn()
+        ? []
+        : genre === 'latin'
+          ? montuno(backing, gBpm, gFirst, end, feelOf(current.keysFeel))
+          : genre === 'bossa'
+            ? bossa(backing, gBpm, gFirst, end, feelOf(current.keysFeel))
+            : genre === 'dream'
+              ? pads(backing, end, feelOf(current.keysFeel))
+              : [],
+      compSound: genre === 'bossa' ? 'pluck' : genre === 'dream' ? 'pad' : 'keys',
+      layers: (current.layers ?? []).filter((l) => !l.muted),
       keysTone: vibeOf(current)?.tone,
+      dust: dustOf(current),
       voiceRoom: vibeOf(current)?.room,
+      voiceEcho: vibeOf(current)?.echo,
+      backing: vibeOf(current)?.backing,
+      drumDark: vibeOf(current)?.drumDark,
       backingTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       chordStyle: 'floaty',
       loop: lp ? { start: lp[0], end: lp[1] } : null,
-    });
+    };
+    return { samples: voiceOf(rec, s), sampleRate: rec.sampleRate, o };
+  }
+
+  async function startPlayback(from: number): Promise<void> {
+    const p = playOptions(from, on(toggles.loop) || layering ? loopSpan() : null);
+    if (!p) return;
+    await player.play(p.samples, p.sampleRate, p.o);
     playBtn.innerHTML = ICON.stop;
     playBtn.setAttribute('aria-label', 'Stop');
     follow();
   }
+  // Export: what you hear, as an MP3. The loop twice over, then the last chord rings out.
+  const exportBtn = $<HTMLButtonElement>('m-export');
+  let exporting = false;
+  exportBtn.addEventListener('click', () => {
+    if (exporting || !current) return;
+    stopPlayback();
+    // With Loop off: the whole take, once.
+    const lp = on(toggles.loop) ? loopSpan() : null;
+    const p = playOptions(lp ? lp[0] : 0, lp);
+    if (!p) return;
+    const name = fileName(current.name);
+    exporting = true;
+    exportBtn.classList.add('busy');
+    void (async () => {
+      try {
+        const buf = await player.render(p.samples, p.sampleRate, p.o, 2);
+        const channels = Array.from({ length: buf.numberOfChannels }, (_, ch) => buf.getChannelData(ch));
+        await handOver(await encodeMp3({ sampleRate: buf.sampleRate, channels }), name);
+      } catch (e) {
+        title.textContent = `Couldn't export: ${e instanceof Error ? e.message : String(e)}`;
+      } finally {
+        exporting = false;
+        exportBtn.classList.remove('busy');
+      }
+    })();
+  });
+
   function stopPlayback(): void {
+    if (layering) void finishLayer(false);
     player.stop();
     player.seek(cue);
     playBtn.innerHTML = ICON.play;
@@ -1257,6 +1442,115 @@ export function mountMobile(root: HTMLElement): void {
     draw();
     requestAnimationFrame(follow);
   }
+// ---------- singing over it ----------
+  // The band loops; tap the mic and sing. A line shows your pitch as you go. Tap again
+  // and what you sang stays on the loop as a layer (every pass you sang is laid on top
+  // of the last). Undo, in More, takes it off again.
+  const layerBtn = $<HTMLButtonElement>('m-layer');
+  const layersEl = $<HTMLDivElement>('m-layers');
+  async function startLayer(): Promise<void> {
+    const lp = loopSpan();
+    if (!current || !lp || starting || layering) return;
+    starting = true;
+    try {
+      await recorder.warm();
+      layering = { lp, p0: lp[0], lat: 0 };
+      if (!player.playing) await startPlayback(lp[0]);
+      else if (!on(toggles.loop)) await startPlayback(player.position);
+      await recorder.start();
+      // What is sung now is heard against what left the speakers a moment ago, and reaches us a moment later.
+      layering.p0 = player.position;
+      layering.lat = player.latency + 0.02;
+      jam.length = 0;
+      layerBtn.classList.add('on');
+      layerBtn.setAttribute('aria-label', 'Keep what I sang');
+    } catch {
+      layering = null; // no microphone
+    } finally {
+      starting = false;
+    }
+  }
+  async function finishLayer(resume = true): Promise<void> {
+    const L = layering;
+    if (!L || !current) return;
+    layering = null;
+    const trail = jam.map(({ t, m }) => ({ t, m })).sort((a, b) => a.t - b.t);
+    jam.length = 0;
+    layerBtn.classList.remove('on');
+    layerBtn.setAttribute('aria-label', 'Sing over it');
+    let take;
+    try {
+      take = await recorder.stop();
+    } catch {
+      return;
+    }
+    const sr = take.sampleRate;
+    const x = take.samples;
+    const len = L.lp[1] - L.lp[0];
+    // Too short, or nobody sang (just jamming along): nothing to keep.
+    if (x.length - take.preRollSamples < sr * 0.4 || roughLevel(x, take.preRollSamples) < 0.004) {
+      draw();
+      return;
+    }
+    // Lay it on the loop: each sample goes where the band was when it was sung, pass over pass.
+    const out = foldOntoLoop(x, sr, L.p0 - L.lp[0] - L.lat - take.preRollSamples / sr, len);
+    (current.layers ??= []).push({ id: newId(), samples: out, sampleRate: sr, start: L.lp[0], trail });
+    void saveRecording(current).catch(() => undefined);
+    render();
+    if (resume && player.playing) void startPlayback(player.position);
+  }
+layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startLayer()));
+  const laysEl = $<HTMLDivElement>('m-lays');
+  /** The layer just removed, kept for a few seconds so one tap brings it back. */
+  let gone: { layer: Layer; i: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  function layersChanged(): void {
+    if (!current) return;
+    void saveRecording(current).catch(() => undefined);
+    render();
+    if (player.playing) void startPlayback(player.position);
+  }
+  laysEl.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    if (!current) return;
+    if (t.closest('[data-undo]')) {
+      if (!gone) return;
+      clearTimeout(gone.timer);
+      (current.layers ??= []).splice(gone.i, 0, gone.layer);
+      gone = null;
+      layersChanged();
+      return;
+    }
+    const b = t.closest<HTMLButtonElement>('.m-lay');
+    const layers = current.layers;
+    if (!b || !layers) return;
+    const i = Number(b.dataset.i);
+    if (gone) clearTimeout(gone.timer);
+    const [layer] = layers.splice(i, 1);
+    gone = {
+      layer,
+      i,
+      timer: setTimeout(() => {
+        gone = null;
+        render();
+      }, 6000),
+    };
+    layersChanged();
+  });
+  layersEl.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    const layers = current?.layers;
+    if (!current || !layers?.length) return;
+    const b = t.closest<HTMLButtonElement>('[data-layer]');
+    if (t.closest('[data-undo]')) layers.pop();
+    else if (b) {
+      const l = layers[Number(b.dataset.layer)];
+      l.muted = !l.muted;
+    } else return;
+    void saveRecording(current).catch(() => undefined);
+    render();
+    if (player.playing) void startPlayback(player.position);
+  });
+
   playBtn.addEventListener('click', () => {
     if (player.playing) stopPlayback();
     else {
@@ -1313,6 +1607,8 @@ export function mountMobile(root: HTMLElement): void {
     const rec = await loadRecording(id);
     if (!rec) return;
     current = rec;
+    if (gone) clearTimeout(gone.timer);
+    gone = null;
     cue = 0;
     if (!rec.analysis) await analyze('normal');
     else {

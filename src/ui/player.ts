@@ -26,12 +26,27 @@ export interface PlayOptions {
   drums: DrumHit[];
   /** 'lofi': a soft, dusty kit through tape-style filtering with a bed of hiss. Default: the plain kit. */
   drumStyle?: 'plain' | 'lofi' | 'latin';
+  /** How dark the lo-fi kit is, 0–1: muffled, tuned down, the hats tucked away. Default 0. */
+  drumDark?: number;
+  /** An echo on the recorded voice, 0–1: dull repeats, three quarters of a beat apart. Default 0. */
+  voiceEcho?: number;
+  /** How loud the band is next to the voice (1 = normal). Keys, guitar and pads follow it fully, the drums about half as much. */
+  backing?: number;
   /** Written-out piano + bass part (the Latin montuno), played short and bright instead of `chords`. */
   comp?: CompNote[];
+  /** What plays `comp`: the electric piano (default), a nylon-guitar pluck, or slow pads. */
+  compSound?: 'keys' | 'pluck' | 'pad';
+  /** Layers sung over the take: each plays at its place on the take's timeline, through the voice chain. */
+  layers?: { samples: Float32Array; sampleRate: number; start: number }[];
   /** How bright the floaty keys are (low-pass, Hz). Default 2800. */
   keysTone?: number;
   /** How much the piano does: 0 = one soft touch per chord, 1 = normal (default), 2 = busier, fills the space. */
   keysFeel?: number;
+  /**
+   * Dust, 0–1: how worn the whole thing sounds. Vinyl crackle, a slow tape wobble in the pitch,
+   * a duller top end, and the band ducking a little under each kick.
+   */
+  dust?: number;
   /** How much room (reverb) is put on the recorded voice, 0–1. Default 0.07: barely there. */
   voiceRoom?: number;
   /** Rain on the window: a looped recording (public/sounds/rain.*) that keeps going across loop passes. */
@@ -73,9 +88,18 @@ export class Player {
   playing = false;
   onEnded: (() => void) | null = null;
 
-  private context(): AudioContext {
+  /** The context that plays out loud. */
+  private live(): AudioContext {
     this.ctx ??= new AudioContext({ latencyHint: 'interactive' });
     return this.ctx;
+  }
+
+  /** While a file is being rendered: the offline context it is rendered in. */
+  private rendering: OfflineAudioContext | null = null;
+
+  /** Where sound is being scheduled: the file being rendered, else the speakers. */
+  private context(): BaseAudioContext {
+    return this.rendering ?? this.live();
   }
 
   /** Current audio position (s), following loop wrap-arounds. */
@@ -94,7 +118,7 @@ export class Player {
     return c ? (c.outputLatency || 0) + (c.baseLatency || 0) : 0;
   }
 
-  private voiceBuffer(ctx: AudioContext): AudioBuffer {
+  private voiceBuffer(ctx: BaseAudioContext): AudioBuffer {
     const samples = this.samples as Float32Array;
     if (this.buffer?.for !== samples || this.buffer.buf.sampleRate !== this.sampleRate) {
       const buf = ctx.createBuffer(1, samples.length, this.sampleRate);
@@ -102,6 +126,262 @@ export class Player {
       this.buffer = { for: samples, buf };
     }
     return this.buffer.buf;
+  }
+
+  // ---------------------------------------------------------------- master + dust
+
+  private master: { ctx: BaseAudioContext; input: GainNode; wow: GainNode; flutter: GainNode; top: BiquadFilterNode } | null = null;
+  private dust = 0;
+  private crackle: { src: AudioBufferSourceNode; gain: GainNode } | null = null;
+  private crackleBuf: AudioBuffer | null = null;
+
+  /**
+   * Where every sound goes: one chain before the speakers. A few milliseconds of delay whose
+   * length drifts slowly (tape wow, plus a faint flutter) and a low-pass for the top end.
+   * With no dust both do nothing.
+   */
+  private out(ctx: BaseAudioContext): AudioNode {
+    if (this.master?.ctx === ctx) return this.master.input;
+    const input = ctx.createGain();
+    const delay = ctx.createDelay(0.05);
+    delay.delayTime.value = 0.006;
+    const lfo = (hz: number): GainNode => {
+      const osc = ctx.createOscillator();
+      osc.frequency.value = hz;
+      const depth = ctx.createGain();
+      depth.gain.value = 0;
+      osc.connect(depth).connect(delay.delayTime);
+      osc.start();
+      return depth;
+    };
+    const top = ctx.createBiquadFilter();
+    top.type = 'lowpass';
+    top.frequency.value = 18000;
+    top.Q.value = 0.5;
+    input.connect(delay).connect(top).connect(ctx.destination);
+    this.master = { ctx, input, wow: lfo(0.55), flutter: lfo(6.3), top };
+    this.applyDust(ctx);
+    return input;
+  }
+
+  /** Change the dust while it plays. */
+  setDust(dust: number): void {
+    this.dust = Math.max(0, Math.min(1, dust));
+    if (this.ctx) this.applyDust(this.ctx);
+  }
+
+  private applyDust(ctx: BaseAudioContext): void {
+    const m = this.master;
+    const d = this.dust;
+    const t = ctx.currentTime;
+    if (m) {
+      // Pitch moves by the speed the delay changes at: about ±9 cents of wow and ±3 of flutter at full dust.
+      m.wow.gain.setTargetAtTime(0.0016 * d, t, 0.1);
+      m.flutter.gain.setTargetAtTime(0.00004 * d, t, 0.1);
+      m.top.frequency.setTargetAtTime(18000 * Math.pow(4200 / 18000, d), t, 0.1);
+    }
+    if (this.crackle) this.crackle.gain.gain.setTargetAtTime(0.085 * d, t, 0.1);
+  }
+
+  /** Six seconds of an old record: sparse little ticks, a pop now and then, a breath of hiss. */
+  private crackleBuffer(ctx: BaseAudioContext): AudioBuffer {
+    if (this.crackleBuf && this.crackleBuf.sampleRate === ctx.sampleRate) return this.crackleBuf;
+    const sr = ctx.sampleRate;
+    const buf = ctx.createBuffer(1, Math.round(6 * sr), sr);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * 0.02;
+    const tick = (at: number, amp: number, len: number): void => {
+      for (let k = 0; k < len && at + k < d.length; k++) d[at + k] += amp * (k % 2 ? -1 : 1) * Math.exp((-4 * k) / len);
+    };
+    for (let i = 0; i < d.length; i++) {
+      if (Math.random() < 16 / sr) tick(i, Math.pow(Math.random(), 3) * 0.7 + 0.05, 6 + Math.floor(Math.random() * 30));
+      if (Math.random() < 0.7 / sr) tick(i, 0.9, 50 + Math.floor(Math.random() * 60));
+    }
+    this.crackleBuf = buf;
+    return buf;
+  }
+
+  private startCrackle(ctx: BaseAudioContext): void {
+    if (this.crackle || this.dust <= 0) return;
+    const src = ctx.createBufferSource();
+    src.buffer = this.crackleBuffer(ctx);
+    src.loop = true;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 700;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 7000;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.setTargetAtTime(0.085 * this.dust, ctx.currentTime, 0.2);
+    src.connect(hp).connect(lp).connect(gain).connect(ctx.destination);
+    src.start(ctx.currentTime, Math.random() * 5);
+    this.crackle = { src, gain };
+  }
+
+  private stopCrackle(): void {
+    const c = this.crackle;
+    const ctx = this.ctx;
+    if (!c || !ctx) return;
+    this.crackle = null;
+    c.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+    setTimeout(() => {
+      try {
+        c.src.stop();
+      } catch {
+        // already stopped
+      }
+      c.src.disconnect();
+    }, 600);
+  }
+
+  // ---------------------------------------------------------------- sampled kit
+
+  private kit: Promise<Record<string, AudioBuffer[]> | null> | null = null;
+  private kitNow: Record<string, AudioBuffer[]> | null = null;
+  private lastHit: Record<string, number> = {};
+
+  /**
+   * The drum kit is real recordings (public/sounds/kit, Virtuosity Drums' close mics, CC0; the snare is the damped one):
+   * a few takes of each drum so no two hits in a row are the same. Loaded once and levelled.
+   * No files, or a format this browser can't decode: the synthesized kit plays instead.
+   */
+  private loadKit(ctx: BaseAudioContext): Promise<Record<string, AudioBuffer[]> | null> {
+    this.kit ??= (async () => {
+      const files: Record<string, string[]> = {
+        kick: ['kick1', 'kick2', 'kick3'],
+        snare: ['snare1', 'snare2', 'snare3'],
+        ghost: ['ghost'],
+        rim: ['rim'],
+        hat: ['hat1', 'hat2', 'hat3'],
+        open: ['open'],
+      };
+      try {
+        const out: Record<string, AudioBuffer[]> = {};
+        for (const [kind, names] of Object.entries(files)) {
+          out[kind] = await Promise.all(
+            names.map(async (name) => {
+              const res = await fetch(new URL(`./sounds/kit/${name}.flac`, document.baseURI));
+              if (!res.ok) throw new Error(name);
+              const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+              let peak = 0;
+              for (let ch = 0; ch < buf.numberOfChannels; ch++) for (const v of buf.getChannelData(ch)) peak = Math.max(peak, Math.abs(v));
+              if (peak > 1e-4) for (let ch = 0; ch < buf.numberOfChannels; ch++) buf.getChannelData(ch).forEach((v, i, a) => (a[i] = v / peak));
+              return buf;
+            }),
+          );
+        }
+        this.kitNow = out;
+        return out;
+      } catch {
+        return null;
+      }
+    })();
+    return this.kit;
+  }
+
+  /** Play a hit from the sampled kit. False if this kind of hit has no sample (or the kit isn't there). */
+  private sampleHit(ctx: BaseAudioContext, dest: AudioNode, h: DrumHit, when: number, v: number): boolean {
+    const kit = this.kitNow;
+    const kind =
+      h.kind === 'kick' ? 'kick' : h.kind === 'snare' ? (h.velocity >= 0.5 ? 'snare' : 'ghost') : h.kind === 'hat' ? 'hat' : h.kind === 'openhat' ? 'open' : h.kind === 'shell' ? 'rim' : null;
+    const takes = kind && kit ? kit[kind] : null;
+    if (!kind || !takes?.length) return false;
+    let i = Math.floor(Math.random() * takes.length);
+    if (takes.length > 1 && i === this.lastHit[kind]) i = (i + 1) % takes.length;
+    this.lastHit[kind] = i;
+    const src = ctx.createBufferSource();
+    src.buffer = takes[i];
+    // Lo-fi: the tape runs a hair slow, so the kit sits a little lower.
+    // A dark kit runs slower still (about two semitones down) and keeps its hats in the background.
+    const dark = this.opts?.drumStyle === 'lofi' ? Math.max(0, Math.min(1, this.opts.drumDark ?? 0)) : 0;
+    src.playbackRate.value = (this.opts?.drumStyle === 'lofi' ? 0.97 : 1) * (1 - 0.11 * dark) * (1 + (Math.random() - 0.5) * 0.02);
+    const tuck = kind === 'hat' || kind === 'open' ? 1 - 0.45 * dark : kind === 'snare' ? 1 - 0.2 * dark : 1;
+    const level = ({ kick: 1, snare: 0.62, ghost: 0.42, rim: 0.26, hat: 0.3, open: 0.24 } as Record<string, number>)[kind] * Math.pow(v, 1.2) * tuck;
+    // Every drum is cut short: the hit, then out, before the shell and the room start to ring.
+    const [hold, fade] = ({ kick: [0.12, 0.09], snare: [0.09, 0.08], ghost: [0.05, 0.05], rim: [0.04, 0.05], hat: [0.04, 0.04], open: [0.14, 0.1] } as Record<string, [number, number]>)[kind];
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(level, when);
+    g.gain.setTargetAtTime(0, when + hold, fade);
+    src.connect(g).connect(dest);
+    src.start(when);
+    this.nodes.push(src);
+    return true;
+  }
+
+  // ---------------------------------------------------------------- sampled piano
+
+  private keys: Promise<{ midi: number; buf: AudioBuffer }[] | null> | null = null;
+  private keysNow: { midi: number; buf: AudioBuffer }[] | null = null;
+
+  /**
+   * The keys are a real piano played softly with the soft pedal down (public/sounds/keys,
+   * Osiris Piano, CC0): one recording every fourth or fifth, the notes in between are the
+   * nearest one tuned up or down. No files: the synthesized electric piano plays instead.
+   */
+  private loadKeys(ctx: BaseAudioContext): Promise<{ midi: number; buf: AudioBuffer }[] | null> {
+    this.keys ??= (async () => {
+      try {
+        const out = await Promise.all(
+          [36, 43, 50, 57, 64, 71, 77, 84].map(async (midi) => {
+            const res = await fetch(new URL(`./sounds/keys/${midi}.flac`, document.baseURI));
+            if (!res.ok) throw new Error(String(midi));
+            const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+            let peak = 0;
+            for (let ch = 0; ch < buf.numberOfChannels; ch++) for (const v of buf.getChannelData(ch)) peak = Math.max(peak, Math.abs(v));
+            if (peak > 1e-4) for (let ch = 0; ch < buf.numberOfChannels; ch++) buf.getChannelData(ch).forEach((v, i, a) => (a[i] = v / peak));
+            return { midi, buf };
+          }),
+        );
+        this.keysNow = out;
+        return out;
+      } catch {
+        return null;
+      }
+    })();
+    return this.keys;
+  }
+
+  /** One piano note from the recordings. It rings and dies away by itself; letting go damps it. False if the piano isn't loaded. */
+  private pianoNote(ctx: BaseAudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number, release: number): boolean {
+    const keys = this.keysNow;
+    if (!keys?.length) return false;
+    const midi = 69 + 12 * Math.log2(hz / 440);
+    let s = keys[0];
+    for (const k of keys) if (Math.abs(k.midi - midi) < Math.abs(s.midi - midi)) s = k;
+    const src = ctx.createBufferSource();
+    src.buffer = s.buf;
+    src.playbackRate.value = Math.pow(2, (midi - s.midi) / 12);
+    const balance = hz > 330 ? Math.pow(330 / hz, 0.3) : 1;
+    const peak = 0.3 * vel * balance;
+    const hold = Math.max(start + 0.05, end);
+    const damp = Math.max(0.1, release * 0.5);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(peak, start + 0.004);
+    env.gain.setTargetAtTime(0, hold, damp);
+    // A softer touch is also a darker one.
+    const touch = ctx.createBiquadFilter();
+    touch.type = 'lowpass';
+    touch.frequency.value = 900 + 5200 * vel;
+    src.connect(touch).connect(env).connect(dest);
+    src.start(start);
+    src.stop(hold + damp * 6 + 0.1);
+    this.nodes.push(src);
+    return true;
+  }
+
+  private layerBuffers = new WeakMap<Float32Array, AudioBuffer>();
+
+  private layerBuffer(ctx: BaseAudioContext, samples: Float32Array, sampleRate: number): AudioBuffer {
+    let buf = this.layerBuffers.get(samples);
+    if (!buf) {
+      buf = ctx.createBuffer(1, samples.length, sampleRate);
+      buf.copyToChannel(new Float32Array(samples), 0);
+      this.layerBuffers.set(samples, buf);
+    }
+    return buf;
   }
 
   private loud: { for: Float32Array; rms: number } | null = null;
@@ -148,7 +428,7 @@ export class Player {
    * two so it loops without a seam. No file, or a format this browser can't
    * decode: no rain, and nothing else is affected.
    */
-  private loadRain(ctx: AudioContext): Promise<AudioBuffer | null> {
+  private loadRain(ctx: BaseAudioContext): Promise<AudioBuffer | null> {
     this.rainLoad ??= (async () => {
       for (const name of ['rain.m4a', 'rain.mp3', 'rain.ogg']) {
         try {
@@ -186,8 +466,8 @@ export class Player {
     return this.rainLoad;
   }
 
-  private startRain(ctx: AudioContext): void {
-    const level = 1;
+  private startRain(ctx: BaseAudioContext): void {
+    const level = 0.4; // well under the music: there, but not in the way
     this.rainWanted = true;
     if (this.rainNow) {
       // Still raining (or fading out from a restart): just bring it back up.
@@ -208,7 +488,7 @@ export class Player {
       const gain = ctx.createGain();
       gain.gain.setValueAtTime(0, t);
       gain.gain.setTargetAtTime(level, t, 0.4);
-      src.connect(gain).connect(ctx.destination);
+      src.connect(gain).connect(this.out(ctx));
       src.start(t, Math.random() * Math.max(0, buf.duration - 1));
       this.rainNow = { src, gain, off: null };
     });
@@ -236,15 +516,16 @@ export class Player {
   /** How the previous chord was played (so the next one is played differently). */
   private lastWay = '';
 
-  private voiceIn: { ctx: AudioContext; node: AudioNode } | null = null;
+  private voiceIn: { ctx: BaseAudioContext; node: AudioNode } | null = null;
   private voiceWet: GainNode | null = null;
+  private voiceEcho: { send: GainNode; delay: DelayNode } | null = null;
 
   /**
    * A light polish on the recorded voice, barely there on purpose: rumble cut,
    * a little less boxiness, a touch of air, gentle levelling, and a whisper of
    * the same room the keys sit in.
    */
-  private voiceBus(ctx: AudioContext): AudioNode {
+  private voiceBus(ctx: BaseAudioContext): AudioNode {
     if (this.voiceIn?.ctx === ctx) return this.voiceIn.node;
     const input = ctx.createGain();
     const rumble = ctx.createBiquadFilter();
@@ -267,27 +548,129 @@ export class Player {
     level.release.value = 0.22;
     const makeup = ctx.createGain();
     makeup.gain.value = 1.2;
-    input.connect(rumble).connect(box).connect(air).connect(level).connect(makeup).connect(ctx.destination);
+    input.connect(rumble).connect(box).connect(air).connect(level).connect(makeup).connect(this.out(ctx));
     const room = ctx.createConvolver();
     room.buffer = this.roomImpulse(ctx);
     const wet = ctx.createGain();
     wet.gain.value = 0.07;
     this.voiceWet = wet;
-    makeup.connect(room).connect(wet).connect(ctx.destination);
+    makeup.connect(room).connect(wet).connect(this.out(ctx));
+    // The echo (off unless asked for): dull repeats that feed back into themselves and into the room.
+    const send = ctx.createGain();
+    send.gain.value = 0;
+    const delay = ctx.createDelay(1);
+    delay.delayTime.value = 0.4;
+    const dull = ctx.createBiquadFilter();
+    dull.type = 'lowpass';
+    dull.frequency.value = 2200;
+    const again = ctx.createGain();
+    again.gain.value = 0.42;
+    makeup.connect(send).connect(delay).connect(dull);
+    dull.connect(again).connect(delay);
+    dull.connect(this.out(ctx));
+    dull.connect(room);
+    this.voiceEcho = { send, delay };
     this.voiceIn = { ctx, node: input };
     return input;
   }
 
+  /** Set how much room and echo the voice gets for this playback. */
+  private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
+    this.voiceBus(ctx);
+    this.voiceWet?.gain.setTargetAtTime(o.voiceRoom ?? 0.07, ctx.currentTime, 0.05);
+    if (this.voiceEcho) {
+      // Three quarters of a (relaxed) beat: the repeats fall between the words, in time.
+      let beat = 60 / Math.max(30, o.bpm);
+      while (beat < 0.5) beat *= 2;
+      while (beat > 1) beat /= 2;
+      this.voiceEcho.delay.delayTime.setValueAtTime(0.75 * beat, ctx.currentTime);
+      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, o.voiceEcho ?? 0)), ctx.currentTime, 0.05);
+    }
+  }
+
+  /**
+   * The same thing `play` would play, as a finished stereo file: the loop span `passes` times
+   * over (or the whole take once, without a loop), then a few seconds for the last chord, the
+   * room and the rain to ring out and fade. Nothing is heard while it renders.
+   */
+  async render(samples: Float32Array, sampleRate: number, o: PlayOptions, passes = 2): Promise<AudioBuffer> {
+    this.stop();
+    const dur = samples.length / sampleRate;
+    const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? o.loop : null;
+    const [a, b] = loop ? [Math.max(0, loop.start), loop.end] : [0, dur];
+    const len = b - a;
+    const times = loop ? Math.max(1, Math.round(passes)) : 1;
+    const lead = 0.05;
+    const tail = 3.5;
+    const rate = this.ctx?.sampleRate === 48000 ? 48000 : 44100;
+    const off = new OfflineAudioContext(2, Math.ceil((lead + len * times + tail) * rate), rate);
+    const keep = { master: this.master, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
+    try {
+      this.rendering = off;
+      this.master = null;
+      this.voiceIn = null;
+      this.crackle = null;
+      this.samples = samples;
+      this.sampleRate = sampleRate;
+      this.opts = o;
+      this.duration = dur;
+      this.dust = Math.max(0, Math.min(1, o.dust ?? 0));
+      if (o.drums.length && o.drumStyle && o.drumStyle !== 'plain') await this.loadKit(off);
+      if ((o.chords.length > 0 && o.chordStyle === 'floaty') || (!!o.comp?.length && (o.compSound ?? 'keys') === 'keys')) await this.loadKeys(off);
+      this.out(off);
+      this.startCrackle(off);
+      const rain = o.rain ? await this.loadRain(off) : null;
+      if (rain) {
+        const src = off.createBufferSource();
+        src.buffer = rain;
+        src.loop = true;
+        const gain = off.createGain();
+        gain.gain.setValueAtTime(0, 0);
+        gain.gain.setTargetAtTime(0.4, 0, 0.4);
+        src.connect(gain).connect(this.out(off));
+        src.start(0, Math.random() * Math.max(0, rain.duration - 1));
+      }
+      this.voiceSends(off, o);
+      for (let p = 0; p < times; p++) this.schedule(a, b, lead + p * len);
+      const buf = await off.startRendering();
+      // The ending: everything still ringing fades away over the last two seconds.
+      const fade = Math.min(buf.length, Math.round(2 * rate));
+      for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+        const d = buf.getChannelData(ch);
+        for (let i = 0; i < fade; i++) {
+          const x = i / fade;
+          d[d.length - 1 - i] *= x * x;
+        }
+      }
+      return buf;
+    } finally {
+      this.rendering = null;
+      this.crackle = null;
+      this.segments = [];
+      Object.assign(this, keep);
+    }
+  }
+
   async play(samples: Float32Array, sampleRate: number, o: PlayOptions): Promise<void> {
     this.stop();
-    const ctx = this.context();
+    const ctx = this.live();
     if (ctx.state === 'suspended') await ctx.resume();
     this.samples = samples;
     this.sampleRate = sampleRate;
     this.opts = o;
     if (o.rain) this.startRain(ctx);
-    this.voiceBus(ctx);
-    this.voiceWet?.gain.setTargetAtTime(o.voiceRoom ?? 0.07, ctx.currentTime, 0.05);
+    this.dust = Math.max(0, Math.min(1, o.dust ?? 0));
+    this.out(ctx);
+    this.applyDust(ctx);
+    this.startCrackle(ctx);
+    // The sampled kit: wait for it the first time (briefly), so the first bar isn't the synth kit.
+    if (o.drums.length && o.drumStyle && o.drumStyle !== 'plain' && !this.kitNow) {
+      await Promise.race([this.loadKit(ctx), new Promise((r) => setTimeout(r, 1500))]);
+    }
+    // Same for the piano.
+    const wantsKeys = (o.chords.length > 0 && o.chordStyle === 'floaty') || (!!o.comp?.length && (o.compSound ?? 'keys') === 'keys');
+    if (wantsKeys && !this.keysNow) await Promise.race([this.loadKeys(ctx), new Promise((r) => setTimeout(r, 2500))]);
+    this.voiceSends(ctx, o);
     this.duration = samples.length / sampleRate;
     // A loop may run past the end of the recording (a whole-bar loop with a silent tail).
     const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? { start: Math.max(0, o.loop.start), end: o.loop.end } : null;
@@ -324,6 +707,19 @@ export class Player {
     const nodes: AudioScheduledSourceNode[] = [];
     this.segments.push({ start: a0, end: b0, at, nodes });
     this.nodes = nodes; // tone() / drum() add their sources here
+    // The band (keys, guitar, pads) goes through one fader that dips under each kick: more dust, deeper dip.
+    const band = ctx.createGain();
+    const backing = Math.max(0, Math.min(2, o.backing ?? 1));
+    band.gain.value = backing;
+    band.connect(this.out(ctx));
+    if (this.dust > 0) {
+      for (const h of o.drums) {
+        if (h.kind !== 'kick' || h.velocity < 0.45 || h.time < a0 || h.time >= b0) continue;
+        const t = at + (h.time - a0);
+        band.gain.setTargetAtTime(backing * (1 - 0.4 * this.dust), t, 0.006);
+        band.gain.setTargetAtTime(backing, t + 0.07, 0.11);
+      }
+    }
     if (o.voice) {
       const src = ctx.createBufferSource();
       src.buffer = this.voiceBuffer(ctx);
@@ -339,12 +735,30 @@ export class Player {
       nodes.push(src);
     }
 
+    for (const l of o.layers ?? []) {
+      const dur = l.samples.length / l.sampleRate;
+      const from = Math.max(a0, l.start);
+      const to = Math.min(b0, l.start + dur);
+      if (to - from < 0.02) continue;
+      const src = ctx.createBufferSource();
+      src.buffer = this.layerBuffer(ctx, l.samples, l.sampleRate);
+      const g = ctx.createGain();
+      const t = at + (from - a0);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(1, t + 0.005);
+      g.gain.setValueAtTime(1, t + (to - from) - 0.005);
+      g.gain.linearRampToValueAtTime(0, t + (to - from));
+      src.connect(g).connect(this.voiceBus(ctx));
+      src.start(t, from - l.start, to - from);
+      nodes.push(src);
+    }
+
     if (o.notes.length > 0) {
       // Simple monophonic synth: triangle + quiet sine an octave up, low-passed, ADSR.
       const bus = ctx.createBiquadFilter();
       bus.type = 'lowpass';
       bus.frequency.value = 3000;
-      bus.connect(ctx.destination);
+      bus.connect(this.out(ctx));
       for (const n of o.notes) {
         const end = Math.min(b0, n.start + n.duration);
         if (end <= a0 || n.start >= b0) continue;
@@ -382,18 +796,18 @@ export class Player {
       // A live, open room: bright, a touch of drive, no tape and no hiss.
       const top = ctx.createBiquadFilter();
       top.type = 'lowpass';
-      top.frequency.value = 11500;
+      top.frequency.value = 6800;
       top.Q.value = 0.5;
       const drive = ctx.createWaveShaper();
       drive.curve = this.warmCurve();
       drive.oversample = '2x';
       const out = ctx.createGain();
-      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.7;
-      top.connect(drive).connect(out).connect(ctx.destination);
+      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.55;
+      top.connect(drive).connect(out).connect(this.out(ctx));
       const room = ctx.createConvolver();
       room.buffer = this.roomImpulse(ctx);
       const wet = ctx.createGain();
-      wet.gain.value = 0.1;
+      wet.gain.value = 0.18;
       drive.connect(room).connect(wet).connect(out);
       for (const h of o.drums) {
         if (h.time < a0 || h.time >= b0) continue;
@@ -402,20 +816,28 @@ export class Player {
     } else if (o.drums.length > 0 && o.drumStyle === 'lofi') {
       // Everything through a dull, slightly driven "tape": no sharp highs, rounded peaks.
       const tape = ctx.createBiquadFilter();
+      // A dark kit is heard through a wall: the top closes down to about 2.4 kHz and the low end fills out.
+      const dark = Math.max(0, Math.min(1, o.drumDark ?? 0));
       tape.type = 'lowpass';
-      tape.frequency.value = 8200;
+      tape.frequency.value = 8200 * Math.pow(2400 / 8200, dark);
       tape.Q.value = 0.5;
       const warmth = ctx.createBiquadFilter();
       warmth.type = 'lowshelf';
       warmth.frequency.value = 140;
-      warmth.gain.value = 3.5;
+      warmth.gain.value = 3.5 + 2 * dark;
       const drive = ctx.createWaveShaper();
       drive.curve = this.warmCurve();
       drive.oversample = '2x';
       const out = ctx.createGain();
       // Sit with the recording: a loud take gets a louder kit.
-      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.8;
-      tape.connect(warmth).connect(drive).connect(out).connect(ctx.destination);
+      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.8 * Math.sqrt(backing);
+      // Take out the boxy low-mids that make a small kit sound like cardboard.
+      const box = ctx.createBiquadFilter();
+      box.type = 'peaking';
+      box.frequency.value = 430;
+      box.Q.value = 0.9;
+      box.gain.value = -5;
+      tape.connect(box).connect(warmth).connect(drive).connect(out).connect(this.out(ctx));
       for (const h of o.drums) {
         if (h.time < a0 || h.time >= b0) continue;
         this.lofiDrum(ctx, tape, h, at + (h.time - a0));
@@ -441,7 +863,7 @@ export class Player {
     } else if (o.drums.length > 0) {
       const bus = ctx.createGain();
       bus.gain.value = 0.55;
-      bus.connect(ctx.destination);
+      bus.connect(this.out(ctx));
       for (const h of o.drums) {
         if (h.time < a0 || h.time >= b0) continue;
         this.drum(ctx, bus, h, at + (h.time - a0));
@@ -492,7 +914,7 @@ export class Player {
       limit.ratio.value = 12;
       limit.attack.value = 0.003;
       limit.release.value = 0.15;
-      level.connect(limit).connect(ctx.destination);
+      level.connect(limit).connect(band);
       sway.connect(dry).connect(level);
       sway.connect(verb).connect(wet).connect(level);
       const beat = 60 / o.bpm;
@@ -557,7 +979,7 @@ export class Player {
       pad.type = 'lowpass';
       pad.frequency.value = 1400;
       pad.Q.value = 0.5;
-      pad.connect(ctx.destination);
+      pad.connect(this.out(ctx));
       for (const c of o.chords) {
         const end = Math.min(b0, c.start + c.duration);
         if (end <= a0 || c.start >= b0) continue;
@@ -576,7 +998,7 @@ export class Player {
           if (c.start + off < a0 || c.start + off >= b0) return;
           const s = at + (c.start + off - a0);
           const e = k === hits.length - 1 ? b : at + (Math.min(b0, c.start + half) - a0);
-          this.tone(ctx, ctx.destination, 'triangle', mtof(c.bass, o.backingTuningCents), s, e - 0.02, 0.32, 0.008, 0.08);
+          this.tone(ctx, this.out(ctx), 'triangle', mtof(c.bass, o.backingTuningCents), s, e - 0.02, 0.32, 0.008, 0.08);
         });
       }
     }
@@ -591,7 +1013,7 @@ export class Player {
       drive.curve = this.warmCurve();
       drive.oversample = '2x';
       const level = ctx.createGain();
-      level.gain.value = this.keysLevel() * 0.8;
+      level.gain.value = this.keysLevel() * 0.65;
       const limit = ctx.createDynamicsCompressor();
       limit.threshold.value = -8;
       limit.knee.value = 6;
@@ -601,14 +1023,21 @@ export class Player {
       const verb = ctx.createConvolver();
       verb.buffer = this.roomImpulse(ctx);
       const wet = ctx.createGain();
-      wet.gain.value = 0.12;
-      bus.connect(drive).connect(level).connect(limit).connect(ctx.destination);
+      const sound = o.compSound ?? 'keys';
+      wet.gain.value = sound === 'pad' ? 0.42 : sound === 'pluck' ? 0.3 : 0.22;
+      bus.connect(drive).connect(level).connect(limit).connect(band);
       drive.connect(verb).connect(wet).connect(level);
       for (const n of o.comp) {
-        if (n.start < a0 || n.start >= b0) continue;
-        const t = at + (n.start - a0) + Math.random() * 0.006;
+        // A long held note that began before this pass is picked up where the pass starts.
+        const held = n.duration > 1 && n.start < a0 && n.start + n.duration > a0 + 0.3;
+        if ((n.start < a0 && !held) || n.start >= b0) continue;
+        const t = at + Math.max(0, n.start - a0) + Math.random() * 0.006;
+        const stop = at + (n.start + n.duration - a0);
         const vel = Math.max(0.12, Math.min(1, n.velocity * (0.9 + 0.2 * Math.random())));
-        this.rhodes(ctx, bus, mtof(n.midi, o.backingTuningCents), t, t + n.duration, vel, n.bass ? 0.16 : 0.07);
+        const hz = mtof(n.midi, o.backingTuningCents);
+        if (sound === 'pad') this.pad(ctx, bus, hz, t, stop, vel);
+        else if (sound === 'pluck') this.pluck(ctx, bus, hz, t, vel, !!n.bass, n.duration);
+        else this.rhodes(ctx, bus, hz, t, stop, vel, n.bass ? 0.2 : 0.14);
       }
     }
 
@@ -623,7 +1052,7 @@ export class Player {
         g.gain.setValueAtTime(0, t);
         g.gain.linearRampToValueAtTime(o.clickGain * (down ? 1 : 0.7), t + 0.002);
         g.gain.exponentialRampToValueAtTime(0.0005, t + 0.05);
-        osc.connect(g).connect(ctx.destination);
+        osc.connect(g).connect(this.out(ctx));
         osc.start(t);
         osc.stop(t + 0.06);
         nodes.push(osc);
@@ -634,7 +1063,7 @@ export class Player {
 
   /** Short audition blip for note editing (independent of playback). */
   async preview(midi: number, tuningCents: number): Promise<void> {
-    const ctx = this.context();
+    const ctx = this.live();
     if (ctx.state === 'suspended') await ctx.resume();
     const t = ctx.currentTime + 0.01;
     const osc = ctx.createOscillator();
@@ -644,20 +1073,21 @@ export class Player {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.3, t + 0.01);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-    osc.connect(g).connect(ctx.destination);
+    osc.connect(g).connect(this.out(ctx));
     osc.start(t);
     osc.stop(t + 0.36);
   }
 
   /** Audition a chord on the soft keys (independent of playback). */
   async previewChord(voicing: number[], bass: number, tuningCents: number): Promise<void> {
-    const ctx = this.context();
+    const ctx = this.live();
     if (ctx.state === 'suspended') await ctx.resume();
+    if (!this.keysNow) await Promise.race([this.loadKeys(ctx), new Promise((r) => setTimeout(r, 2500))]);
     const t = ctx.currentTime + 0.02;
     const keep = this.nodes;
     this.nodes = [];
-    voicing.forEach((m, k) => this.rhodes(ctx, ctx.destination, mtof(m, tuningCents), t + k * 0.02, t + 0.9, 0.8));
-    this.rhodes(ctx, ctx.destination, mtof(bass, tuningCents), t, t + 0.9, 0.9);
+    voicing.forEach((m, k) => this.rhodes(ctx, this.out(ctx), mtof(m, tuningCents), t + k * 0.02, t + 0.9, 0.8));
+    this.rhodes(ctx, this.out(ctx), mtof(bass, tuningCents), t, t + 0.9, 0.9);
     this.nodes = keep;
   }
 
@@ -665,7 +1095,7 @@ export class Player {
   private room: AudioBuffer | null = null;
 
   /** Stereo decaying-noise impulse: a soft ~2 s room. */
-  private roomImpulse(ctx: AudioContext): AudioBuffer {
+  private roomImpulse(ctx: BaseAudioContext): AudioBuffer {
     if (this.room && this.room.sampleRate === ctx.sampleRate) return this.room;
     const len = Math.round(2.2 * ctx.sampleRate);
     const buf = ctx.createBuffer(2, len, ctx.sampleRate);
@@ -706,7 +1136,8 @@ export class Player {
    *  - a soft triangle underneath starts bright and closes, giving weight;
    *  - notes in the upper middle (where a pure tone bites the ear) are played softer.
    */
-  private rhodes(ctx: AudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number, release = 0.7): void {
+  private rhodes(ctx: BaseAudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number, release = 0.7): void {
+    if (this.pianoNote(ctx, dest, hz, start, end, vel, release)) return;
     const balance = hz > 330 ? Math.pow(330 / hz, 0.45) : 1;
     const peak = 0.075 * vel * balance;
     const hold = Math.max(start + 0.05, end);
@@ -770,7 +1201,67 @@ export class Player {
     }
   }
 
-  private noiseBuffer(ctx: AudioContext): AudioBuffer {
+  /** One note of a slow pad: two soft voices a few cents apart that swell in over a second and let go in about one more. */
+  private pad(ctx: BaseAudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number): void {
+    const balance = hz > 330 ? Math.pow(330 / hz, 0.5) : 1;
+    const peak = 0.05 * vel * balance;
+    const hold = Math.max(start + 0.4, end);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(peak, start + Math.min(1.1, (hold - start) * 0.6));
+    env.gain.setTargetAtTime(0, hold, 0.3);
+    const soft = ctx.createBiquadFilter();
+    soft.type = 'lowpass';
+    soft.frequency.value = Math.min(1800, hz * 3);
+    soft.connect(env).connect(dest);
+    for (const [cents, pan] of [
+      [-7, -0.5],
+      [7, 0.5],
+    ]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = hz * Math.pow(2, cents / 1200);
+      const side = ctx.createStereoPanner();
+      side.pan.value = pan;
+      osc.connect(side).connect(soft);
+      osc.start(start);
+      osc.stop(hold + 2);
+      this.nodes.push(osc);
+    }
+  }
+
+  /** One plucked nylon string: a quick soft attack that closes and dies away on its own. A longer note is left to ring longer. */
+  private pluck(ctx: BaseAudioContext, dest: AudioNode, hz: number, start: number, vel: number, bass: boolean, duration = 0): void {
+    const balance = hz > 330 ? Math.pow(330 / hz, 0.4) : 1;
+    const peak = (bass ? 0.2 : 0.14) * vel * balance;
+    const ring = bass ? 0.5 : Math.max(0.32, Math.min(0.7, duration * 0.5));
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(peak, start + 0.004);
+    env.gain.setTargetAtTime(0, start + 0.004, ring);
+    const close = ctx.createBiquadFilter();
+    close.type = 'lowpass';
+    close.frequency.setValueAtTime(Math.min(3200, hz * 7), start);
+    close.frequency.setTargetAtTime(Math.min(900, hz * 2.2), start, 0.12);
+    close.connect(env).connect(dest);
+    for (const [type, mult, level] of [
+      ['triangle', 1, 1],
+      ['sine', 2, 0.3],
+      ['sine', 3, 0.1],
+    ] as [OscillatorType, number, number][]) {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = hz * mult * Math.pow(2, (Math.random() - 0.5) * 6 / 1200);
+      const g = ctx.createGain();
+      g.gain.value = level;
+      osc.connect(g).connect(close);
+      osc.start(start);
+      osc.stop(start + ring * 7);
+      this.nodes.push(osc);
+    }
+  }
+
+  private noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
     if (this.noise && this.noise.sampleRate === ctx.sampleRate) return this.noise;
     const buf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const d = buf.getChannelData(0);
@@ -781,7 +1272,7 @@ export class Player {
 
   /** Sustained oscillator voice with attack / release envelope. */
   private tone(
-    ctx: AudioContext,
+    ctx: BaseAudioContext,
     dest: AudioNode,
     type: OscillatorType,
     hz: number,
@@ -807,9 +1298,10 @@ export class Player {
   }
 
   /** One hit of the lo-fi kit: soft thud of a kick, a dusty snare, short muffled hats. Never quite the same twice. */
-  private lofiDrum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
+  private lofiDrum(ctx: BaseAudioContext, dest: AudioNode, h: DrumHit, t: number): void {
     const v = h.velocity * (0.88 + 0.24 * Math.random());
     const when = t + (Math.random() - 0.3) * 0.006; // a little loose, leaning late
+    if (this.sampleHit(ctx, dest, h, when, v)) return;
     const noise = (): AudioBufferSourceNode => {
       const n = ctx.createBufferSource();
       n.buffer = this.noiseBuffer(ctx);
@@ -893,13 +1385,14 @@ export class Player {
   }
 
   /** One hit of the Latin percussion: clave, congas (open tone / slap), cáscara, shaker, bell, timbale. */
-  private latinDrum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
+  private latinDrum(ctx: BaseAudioContext, dest: AudioNode, h: DrumHit, t: number): void {
     if (h.kind === 'kick' || h.kind === 'snare' || h.kind === 'hat' || h.kind === 'openhat') {
       this.lofiDrum(ctx, dest, h, t);
       return;
     }
     const v = h.velocity * (0.9 + 0.2 * Math.random());
     const when = t + (Math.random() - 0.5) * 0.004;
+    if (h.kind === 'shell' && this.sampleHit(ctx, dest, h, when, v)) return;
     /** A burst of filtered noise: [filter type, Hz, Q, level, attack s, decay time-constant s]. */
     const burst = (type: BiquadFilterType, hz: number, q: number, level: number, attack: number, decay: number): void => {
       const n = ctx.createBufferSource();
@@ -965,7 +1458,7 @@ export class Player {
     }
   }
 
-  private drum(ctx: AudioContext, dest: AudioNode, h: DrumHit, t: number): void {
+  private drum(ctx: BaseAudioContext, dest: AudioNode, h: DrumHit, t: number): void {
     const v = h.velocity;
     if (h.kind === 'kick') {
       const osc = ctx.createOscillator();
@@ -1011,6 +1504,7 @@ export class Player {
 
   stop(keepPosition = true): void {
     this.stopRain();
+    this.stopCrackle();
     if (this.playing && keepPosition) this.stopped = this.position;
     if (this.timer) {
       clearInterval(this.timer);
