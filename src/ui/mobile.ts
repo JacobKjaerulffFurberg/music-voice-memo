@@ -53,7 +53,7 @@ const TEMPLATE = `
 <div class="m" id="m">
   <header class="m-top">
     <button class="m-icon" id="m-takes" aria-label="Takes">${ICON.list}</button>
-    <span class="m-title" id="m-title"></span>
+    <span class="m-title" id="m-title" aria-label="Rename"></span>
     <button class="m-icon" id="m-adv" aria-label="More controls" aria-pressed="false">${ICON.more}</button>
   </header>
 
@@ -404,6 +404,7 @@ export function mountMobile(root: HTMLElement): void {
       timer.textContent = '';
       hint.textContent = 'Sing';
       title.textContent = '';
+      title.classList.remove('can');
     }
     if (v === 'recording') hint.textContent = '';
   }
@@ -679,7 +680,8 @@ export function mountMobile(root: HTMLElement): void {
       // One dot = super chill, two = normal, three = busy.
       $<HTMLElement>(`${id}-pips`).innerHTML = [0, 1, 2].map((k) => `<i class="${k <= v ? 'hot' : ''}"></i>`).join('');
     }
-    title.textContent = rec.name + (rec.analysis.quality === 'high' ? ' ✦' : '');
+    if (!renaming) title.textContent = rec.name + (rec.analysis.quality === 'high' ? ' ✦' : '');
+    title.classList.add('can');
     const [tonic, mode] = s.key ? [s.key.name.split(' ')[0], s.key.name.split(' ')[1] ?? ''] : ['—', 'key'];
     $<HTMLElement>('m-key').textContent = tonic;
     $<HTMLElement>('m-mode').textContent = mode;
@@ -761,6 +763,40 @@ export function mountMobile(root: HTMLElement): void {
       const [t0] = span();
       void startPlayback(Math.max(cue, t0 - 0.2));
     }
+  });
+
+  // The name in the top bar: tap it (there is a small pencil) and type a new one.
+  let renaming = false;
+  title.addEventListener('click', () => {
+    const rec = current;
+    if (!rec || view !== 'result' || renaming) return;
+    renaming = true;
+    const input = document.createElement('input');
+    input.className = 'm-rename';
+    input.value = rec.name;
+    input.maxLength = 60;
+    input.enterKeyHint = 'done';
+    input.setAttribute('aria-label', 'Name');
+    title.replaceChildren(input);
+    title.classList.add('editing');
+    input.focus();
+    input.select();
+    const done = (keep: boolean): void => {
+      if (!renaming) return;
+      renaming = false;
+      title.classList.remove('editing');
+      const name = input.value.replace(/s+/g, ' ').trim();
+      if (keep && name && name !== rec.name) {
+        rec.name = name;
+        void saveRecording(rec, false).catch(() => undefined);
+      }
+      if (current === rec) render();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') done(true);
+      else if (e.key === 'Escape') done(false);
+    });
+    input.addEventListener('blur', () => done(true));
   });
 
   function save(): void {
@@ -983,6 +1019,31 @@ export function mountMobile(root: HTMLElement): void {
     return { W, H, x, t: tAt, y, lo, hi, top };
   }
 
+  /**
+   * The sung pitch as MIDI, smoothed over ~180 ms (about one vibrato cycle) so vibrato reads as
+   * where the pitch sits, not a scribble. Worked out once per take, not on every frame.
+   */
+  let smoothMemo: { tr: object; tune: number; m: Float64Array } | null = null;
+  function smoothPitch(tr: { f0Hz: ArrayLike<number>; confidence: ArrayLike<number>; hopSec: number }, tune: number): Float64Array {
+    if (smoothMemo?.tr === tr && smoothMemo.tune === tune) return smoothMemo.m;
+    const raw = Array.from(tr.f0Hz, (f, i) => (f > 0 && tr.confidence[i] >= 0.3 ? hzToMidi(f) - tune : NaN));
+    const half = Math.max(1, Math.round(0.09 / tr.hopSec));
+    const m = new Float64Array(raw.length).fill(NaN);
+    for (let i = 0; i < raw.length; i++) {
+      if (Number.isNaN(raw[i])) continue;
+      let sum = 0;
+      let k = 0;
+      for (let j = Math.max(0, i - half); j <= Math.min(raw.length - 1, i + half); j++) {
+        if (Number.isNaN(raw[j]) || Math.abs(raw[j] - raw[i]) > 1) continue;
+        sum += raw[j];
+        k++;
+      }
+      m[i] = sum / k;
+    }
+    smoothMemo = { tr, tune, m };
+    return m;
+  }
+
   function draw(): void {
     const rec = take();
     const a = rec?.analysis;
@@ -1080,22 +1141,13 @@ export function mountMobile(root: HTMLElement): void {
     let pen = false;
     let prevM = NaN;
     let prevX = NaN;
-    // Smoothed over ~180 ms (about one vibrato cycle) so vibrato reads as where the pitch sits, not a scribble.
-    const raw = Array.from(tr.f0Hz, (f, i) => (f > 0 && tr.confidence[i] >= 0.3 ? hzToMidi(f) - tune : NaN));
-    const half = Math.max(1, Math.round(0.09 / tr.hopSec));
-    for (let i = 0; i < raw.length; i++) {
-      if (Number.isNaN(raw[i])) {
+    const smooth = smoothPitch(tr, tune);
+    for (let i = 0; i < smooth.length; i++) {
+      const m = smooth[i];
+      if (Number.isNaN(m)) {
         pen = false;
         continue;
       }
-      let sum = 0;
-      let k = 0;
-      for (let j = Math.max(0, i - half); j <= Math.min(raw.length - 1, i + half); j++) {
-        if (Number.isNaN(raw[j]) || Math.abs(raw[j] - raw[i]) > 1) continue;
-        sum += raw[j];
-        k++;
-      }
-      const m = sum / k;
       const xx = g.x(tr.times[i]);
       if (m < g.lo - 1 || m > g.hi + 1) {
         pen = false;
@@ -1427,20 +1479,42 @@ export function mountMobile(root: HTMLElement): void {
     playBtn.setAttribute('aria-label', 'Play');
     draw();
   };
+  // While playing: the playhead moves at about 30 frames a second (plenty for a line crawling
+  // across), and the chord chips are only touched when the chord changes. Leaves the phone
+  // its breath for the sound.
+  let followAt = 0;
+  let followIdx = -2;
+  let following = false;
   function follow(): void {
-    if (!player.playing) return;
+    if (following) return; // already running (playback restarted while playing)
+    following = true;
+    requestAnimationFrame(followFrame);
+  }
+  function followFrame(): void {
+    if (!player.playing) {
+      following = false;
+      followIdx = -2;
+      return;
+    }
+    requestAnimationFrame(followFrame);
+    const nowMs = performance.now();
+    if (nowMs - followAt < 30) return;
+    followAt = nowMs;
     const p = player.position;
     let idx = -1;
     chords.forEach((c, i) => {
       if (p >= c.start && p < c.start + c.duration) idx = i;
     });
-    chordsEl.querySelectorAll<HTMLElement>('.m-chord').forEach((el, i) => {
-      const now = i === idx;
-      if (now && !el.classList.contains('now')) el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
-      el.classList.toggle('now', now);
-    });
+    const chips = chordsEl.getElementsByClassName('m-chord');
+    if (idx !== followIdx || (idx >= 0 && !chips[idx]?.classList.contains('now'))) {
+      followIdx = idx;
+      chordsEl.querySelectorAll<HTMLElement>('.m-chord').forEach((el, i) => {
+        const now = i === idx;
+        if (now && !el.classList.contains('now')) el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+        el.classList.toggle('now', now);
+      });
+    }
     draw();
-    requestAnimationFrame(follow);
   }
 // ---------- singing over it ----------
   // The band loops; tap the mic and sing. A line shows your pitch as you go. Tap again

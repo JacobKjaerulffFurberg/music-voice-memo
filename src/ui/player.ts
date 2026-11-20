@@ -90,7 +90,9 @@ export class Player {
 
   /** The context that plays out loud. */
   private live(): AudioContext {
-    this.ctx ??= new AudioContext({ latencyHint: 'interactive' });
+    // 'playback': bigger audio buffers. Phones can't keep up with tiny ones and the sound crackles;
+    // the extra delay is reported in `latency`, so layers still line up.
+    this.ctx ??= new AudioContext({ latencyHint: 'playback' });
     return this.ctx;
   }
 
@@ -158,7 +160,17 @@ export class Player {
     top.type = 'lowpass';
     top.frequency.value = 18000;
     top.Q.value = 0.5;
-    input.connect(delay).connect(top).connect(ctx.destination);
+    // A safety limiter last: when everything lands at once it is squeezed instead of clipping (the
+    // harsh crunch). The trim takes back the compressor's built-in make-up gain (~+1.7 dB).
+    const limit = ctx.createDynamicsCompressor();
+    limit.threshold.value = -3;
+    limit.knee.value = 3;
+    limit.ratio.value = 20;
+    limit.attack.value = 0.002;
+    limit.release.value = 0.12;
+    const trim = ctx.createGain();
+    trim.gain.value = 0.82;
+    input.connect(delay).connect(top).connect(limit).connect(trim).connect(ctx.destination);
     this.master = { ctx, input, wow: lfo(0.55), flutter: lfo(6.3), top };
     this.applyDust(ctx);
     return input;
@@ -604,10 +616,11 @@ export class Player {
     const tail = 3.5;
     const rate = this.ctx?.sampleRate === 48000 ? 48000 : 44100;
     const off = new OfflineAudioContext(2, Math.ceil((lead + len * times + tail) * rate), rate);
-    const keep = { master: this.master, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
+    const keep = { master: this.master, fx: this.fx, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
     try {
       this.rendering = off;
       this.master = null;
+      this.fx = null;
       this.voiceIn = null;
       this.crackle = null;
       this.samples = samples;
@@ -631,7 +644,8 @@ export class Player {
         src.start(0, Math.random() * Math.max(0, rain.duration - 1));
       }
       this.voiceSends(off, o);
-      for (let p = 0; p < times; p++) this.schedule(a, b, lead + p * len);
+      this.resetBand(off, o);
+      for (let p = 0; p < times; p++) this.schedule(this.pass(a, b, lead + p * len), a, b);
       const buf = await off.startRendering();
       // The ending: everything still ringing fades away over the last two seconds.
       const fade = Math.min(buf.length, Math.round(2 * rate));
@@ -678,49 +692,252 @@ export class Player {
     if (loop && (from < loop.start || from >= loop.end)) from = loop.start;
     const t0 = ctx.currentTime + 0.05;
     this.playing = true;
-    if (loop) {
-      this.schedule(from, loop.end, t0);
-      // Keep one pass queued ahead; drop finished passes.
-      this.timer = setInterval(() => {
-        const last = this.segments[this.segments.length - 1];
-        if (!last || !this.playing) return;
-        const lastEnd = last.at + (last.end - last.start);
-        if (ctx.currentTime > lastEnd - 0.6) this.schedule(loop.start, loop.end, lastEnd);
-        while (this.segments.length > 2 && this.segments[1].at + (this.segments[1].end - this.segments[1].start) < ctx.currentTime) {
-          this.segments.shift();
-        }
-      }, 100);
-    } else {
-      this.schedule(from, this.duration, t0);
-      this.timer = setTimeout(() => {
+    this.resetBand(ctx, o);
+    this.looping = loop;
+    // Sound is queued a little at a time, a couple of seconds ahead of what is heard: a phone
+    // only ever carries the notes of the next few seconds, not every note of the take at once.
+    this.cursor = { seg: this.pass(from, loop ? loop.end : this.duration, t0), t: from };
+    this.pump();
+    this.timer = setInterval(() => this.pump(), 200);
+    if (!loop) {
+      this.endTimer = setTimeout(() => {
         this.stop(false);
         this.stopped = from;
         this.onEnded?.();
-      }, (this.duration - from) * 1000 + 100) as unknown as ReturnType<typeof setInterval>;
+      }, (this.duration - from) * 1000 + 100);
     }
   }
 
-  /** Schedule audio-time [a0, b0) of every enabled part to start at context time `at`. */
-  private schedule(a0: number, b0: number, at: number): void {
+  /** How far ahead (s) sound is queued while playing, and in steps of how long. */
+  private static readonly AHEAD = 2.5;
+  private static readonly STEP = 1;
+  private endTimer: ReturnType<typeof setTimeout> | null = null;
+  private looping: { start: number; end: number } | null = null;
+  /** Where queuing has got to: the pass being filled, and the take time it is filled up to. */
+  private cursor: { seg: Segment; t: number } | null = null;
+
+  /** A new pass over take time [a, b), heard from context time `at`. */
+  private pass(a: number, b: number, at: number): Segment {
+    const seg: Segment = { start: a, end: b, at, nodes: [] };
+    this.segments.push(seg);
+    return seg;
+  }
+
+  /** Queue whatever starts within the next few seconds; start the next loop pass when this one is all queued. */
+  private pump(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.playing) return;
+    const until = ctx.currentTime + Player.AHEAD;
+    while (this.cursor) {
+      const { seg, t } = this.cursor;
+      if (seg.at + (t - seg.start) > until) break;
+      const w1 = Math.min(seg.end, t + Player.STEP);
+      this.schedule(seg, t, w1);
+      if (w1 < seg.end) this.cursor = { seg, t: w1 };
+      else if (this.looping) {
+        const l = this.looping;
+        this.cursor = { seg: this.pass(l.start, l.end, seg.at + (seg.end - seg.start)), t: l.start };
+      } else this.cursor = null;
+    }
+    // Drop passes long finished (their tails have rung out by the time the next one ends).
+    const now = ctx.currentTime;
+    while (this.segments.length > 2 && this.segments[1].at + (this.segments[1].end - this.segments[1].start) < now) this.segments.shift();
+  }
+
+  // ---------------------------------------------------------------- the band's effect chains
+
+  /**
+   * Filters, drive, rooms and limiters for each part, built once per context and reused by every
+   * pass. (Building them anew for each loop pass meant several reverbs running at once on the
+   * overlaps, which is what a phone can't keep up with.)
+   */
+  private fx: {
+    ctx: BaseAudioContext;
+    band: GainNode;
+    keys?: { bus: BiquadFilterNode; level: GainNode };
+    comp?: { bus: BiquadFilterNode; level: GainNode; wet: GainNode };
+    lofi?: { tape: BiquadFilterNode; warmth: BiquadFilterNode; out: GainNode };
+    latin?: { top: BiquadFilterNode; out: GainNode };
+    notes?: BiquadFilterNode;
+    plain?: GainNode;
+    pad?: BiquadFilterNode;
+  } | null = null;
+
+  /** The band (keys, guitar, pads) goes through one fader that dips under each kick. */
+  private chains(ctx: BaseAudioContext): NonNullable<Player['fx']> {
+    if (this.fx?.ctx === ctx) return this.fx;
+    const band = ctx.createGain();
+    band.connect(this.out(ctx));
+    this.fx = { ctx, band };
+    return this.fx;
+  }
+
+  /** Back to the plain band level, dropping dips queued for a playback that was stopped. */
+  private resetBand(ctx: BaseAudioContext, o: PlayOptions): void {
+    const g = this.chains(ctx).band.gain;
+    const t = ctx.currentTime;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(Math.max(0, Math.min(2, o.backing ?? 1)), t);
+  }
+
+  private warmShaper(ctx: BaseAudioContext): WaveShaperNode {
+    const drive = ctx.createWaveShaper();
+    drive.curve = this.warmCurve();
+    drive.oversample = '2x';
+    return drive;
+  }
+
+  private roomNode(ctx: BaseAudioContext): ConvolverNode {
+    const room = ctx.createConvolver();
+    room.buffer = this.roomImpulse(ctx);
+    return room;
+  }
+
+  private limiter(ctx: BaseAudioContext): DynamicsCompressorNode {
+    const limit = ctx.createDynamicsCompressor();
+    limit.threshold.value = -8;
+    limit.knee.value = 6;
+    limit.ratio.value = 12;
+    limit.attack.value = 0.003;
+    limit.release.value = 0.15;
+    return limit;
+  }
+
+  /**
+   * The floaty keys: a warm electric piano played by a hand: soft drive, a slow stereo sway
+   * (the classic suitcase tremolo) and a small room. Tails ring past each change.
+   */
+  private keysChain(ctx: BaseAudioContext, o: PlayOptions): AudioNode {
+    const fx = this.chains(ctx);
+    if (!fx.keys) {
+      const bus = ctx.createBiquadFilter();
+      bus.type = 'lowpass';
+      bus.Q.value = 0.4;
+      const drive = this.warmShaper(ctx);
+      const sway = ctx.createStereoPanner();
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 3.1;
+      const depth = ctx.createGain();
+      depth.gain.value = 0.28;
+      lfo.connect(depth).connect(sway.pan);
+      lfo.start();
+      const dry = ctx.createGain();
+      dry.gain.value = 0.85;
+      const wet = ctx.createGain();
+      wet.gain.value = 0.3;
+      const breathe = ctx.createGain();
+      breathe.gain.value = 0.93;
+      const swell = ctx.createOscillator();
+      swell.frequency.value = 4.3;
+      const swellDepth = ctx.createGain();
+      swellDepth.gain.value = 0.07;
+      swell.connect(swellDepth).connect(breathe.gain);
+      swell.start();
+      bus.connect(drive).connect(breathe).connect(sway);
+      const level = ctx.createGain();
+      level.connect(this.limiter(ctx)).connect(fx.band);
+      sway.connect(dry).connect(level);
+      sway.connect(this.roomNode(ctx)).connect(wet).connect(level);
+      fx.keys = { bus, level };
+    }
+    fx.keys.bus.frequency.value = o.keysTone ?? 2800;
+    fx.keys.level.gain.value = this.keysLevel();
+    return fx.keys.bus;
+  }
+
+  /** The montuno / bossa / dream part: bright and dry for keys, roomier for the pluck and pads. */
+  private compChain(ctx: BaseAudioContext, o: PlayOptions): AudioNode {
+    const fx = this.chains(ctx);
+    if (!fx.comp) {
+      const bus = ctx.createBiquadFilter();
+      bus.type = 'lowpass';
+      bus.Q.value = 0.4;
+      const drive = this.warmShaper(ctx);
+      const level = ctx.createGain();
+      const wet = ctx.createGain();
+      bus.connect(drive).connect(level).connect(this.limiter(ctx)).connect(fx.band);
+      drive.connect(this.roomNode(ctx)).connect(wet).connect(level);
+      fx.comp = { bus, level, wet };
+    }
+    const sound = o.compSound ?? 'keys';
+    fx.comp.bus.frequency.value = o.keysTone ?? 5200;
+    fx.comp.level.gain.value = this.keysLevel() * 0.65;
+    fx.comp.wet.gain.value = sound === 'pad' ? 0.42 : sound === 'pluck' ? 0.3 : 0.22;
+    return fx.comp.bus;
+  }
+
+  /** The lo-fi kit's "tape": no sharp highs, rounded peaks, the boxy low-mids taken out. */
+  private lofiChain(ctx: BaseAudioContext, o: PlayOptions): { tape: AudioNode; out: AudioNode } {
+    const fx = this.chains(ctx);
+    if (!fx.lofi) {
+      const tape = ctx.createBiquadFilter();
+      tape.type = 'lowpass';
+      tape.Q.value = 0.5;
+      const warmth = ctx.createBiquadFilter();
+      warmth.type = 'lowshelf';
+      warmth.frequency.value = 140;
+      // Take out the boxy low-mids that make a small kit sound like cardboard.
+      const box = ctx.createBiquadFilter();
+      box.type = 'peaking';
+      box.frequency.value = 430;
+      box.Q.value = 0.9;
+      box.gain.value = -5;
+      const out = ctx.createGain();
+      tape.connect(box).connect(warmth).connect(this.warmShaper(ctx)).connect(out).connect(this.out(ctx));
+      fx.lofi = { tape, warmth, out };
+    }
+    // A dark kit is heard through a wall: the top closes down to about 2.4 kHz and the low end fills out.
+    const dark = Math.max(0, Math.min(1, o.drumDark ?? 0));
+    fx.lofi.tape.frequency.value = 8200 * Math.pow(2400 / 8200, dark);
+    fx.lofi.warmth.gain.value = 3.5 + 2 * dark;
+    // Sit with the recording: a loud take gets a louder kit.
+    const backing = Math.max(0, Math.min(2, o.backing ?? 1));
+    fx.lofi.out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.8 * Math.sqrt(backing);
+    return fx.lofi;
+  }
+
+  /** The Latin percussion: a live, open room: bright, a touch of drive, no tape and no hiss. */
+  private latinChain(ctx: BaseAudioContext): AudioNode {
+    const fx = this.chains(ctx);
+    if (!fx.latin) {
+      const top = ctx.createBiquadFilter();
+      top.type = 'lowpass';
+      top.frequency.value = 6800;
+      top.Q.value = 0.5;
+      const drive = this.warmShaper(ctx);
+      const out = ctx.createGain();
+      top.connect(drive).connect(out).connect(this.out(ctx));
+      const wet = ctx.createGain();
+      wet.gain.value = 0.18;
+      drive.connect(this.roomNode(ctx)).connect(wet).connect(out);
+      fx.latin = { top, out };
+    }
+    fx.latin.out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.55;
+    return fx.latin.top;
+  }
+
+  /** Queue the part of pass `seg` whose sounds start within take time [w0, w1). */
+  private schedule(seg: Segment, w0: number, w1: number): void {
     const ctx = this.context();
     const o = this.opts as PlayOptions;
-    const nodes: AudioScheduledSourceNode[] = [];
-    this.segments.push({ start: a0, end: b0, at, nodes });
-    this.nodes = nodes; // tone() / drum() add their sources here
-    // The band (keys, guitar, pads) goes through one fader that dips under each kick: more dust, deeper dip.
-    const band = ctx.createGain();
+    const { start: a0, end: b0, at } = seg;
+    /** The pass's first step: the long sounds that run through all of it start here. */
+    const first = w0 <= a0;
+    const inStep = (t: number): boolean => t >= w0 && t < w1;
+    this.nodes = seg.nodes; // tone() / drum() add their sources here
+    const fx = this.chains(ctx);
+    // The band dips under each kick: more dust, deeper dip.
+    const band = fx.band;
     const backing = Math.max(0, Math.min(2, o.backing ?? 1));
-    band.gain.value = backing;
-    band.connect(this.out(ctx));
     if (this.dust > 0) {
       for (const h of o.drums) {
-        if (h.kind !== 'kick' || h.velocity < 0.45 || h.time < a0 || h.time >= b0) continue;
+        if (h.kind !== 'kick' || h.velocity < 0.45 || !inStep(h.time)) continue;
         const t = at + (h.time - a0);
         band.gain.setTargetAtTime(backing * (1 - 0.4 * this.dust), t, 0.006);
         band.gain.setTargetAtTime(backing, t + 0.07, 0.11);
       }
     }
-    if (o.voice) {
+    if (o.voice && first) {
       const src = ctx.createBufferSource();
       src.buffer = this.voiceBuffer(ctx);
       const g = ctx.createGain();
@@ -732,10 +949,10 @@ export class Player {
       g.gain.linearRampToValueAtTime(0, at + len);
       src.connect(g).connect(this.voiceBus(ctx));
       src.start(at, a0, len);
-      nodes.push(src);
+      this.nodes.push(src);
     }
 
-    for (const l of o.layers ?? []) {
+    for (const l of first ? (o.layers ?? []) : []) {
       const dur = l.samples.length / l.sampleRate;
       const from = Math.max(a0, l.start);
       const to = Math.min(b0, l.start + dur);
@@ -750,18 +967,21 @@ export class Player {
       g.gain.linearRampToValueAtTime(0, t + (to - from));
       src.connect(g).connect(this.voiceBus(ctx));
       src.start(t, from - l.start, to - from);
-      nodes.push(src);
+      this.nodes.push(src);
     }
 
     if (o.notes.length > 0) {
       // Simple monophonic synth: triangle + quiet sine an octave up, low-passed, ADSR.
-      const bus = ctx.createBiquadFilter();
-      bus.type = 'lowpass';
-      bus.frequency.value = 3000;
-      bus.connect(this.out(ctx));
+      if (!fx.notes) {
+        fx.notes = ctx.createBiquadFilter();
+        fx.notes.type = 'lowpass';
+        fx.notes.frequency.value = 3000;
+        fx.notes.connect(this.out(ctx));
+      }
+      const bus = fx.notes;
       for (const n of o.notes) {
         const end = Math.min(b0, n.start + n.duration);
-        if (end <= a0 || n.start >= b0) continue;
+        if (end <= a0 || n.start >= b0 || !inStep(Math.max(a0, n.start))) continue;
         const startAt = at + Math.max(0, n.start - a0);
         const stopAt = at + (end - a0);
         const hz = 440 * Math.pow(2, (n.midi - 69 + o.notesTuningCents / 100) / 12);
@@ -787,140 +1007,63 @@ export class Player {
           osc.connect(lg).connect(g);
           osc.start(startAt);
           osc.stop(stopAt + 0.08);
-          nodes.push(osc);
+          this.nodes.push(osc);
         }
       }
     }
 
     if (o.drums.length > 0 && o.drumStyle === 'latin') {
-      // A live, open room: bright, a touch of drive, no tape and no hiss.
-      const top = ctx.createBiquadFilter();
-      top.type = 'lowpass';
-      top.frequency.value = 6800;
-      top.Q.value = 0.5;
-      const drive = ctx.createWaveShaper();
-      drive.curve = this.warmCurve();
-      drive.oversample = '2x';
-      const out = ctx.createGain();
-      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.55;
-      top.connect(drive).connect(out).connect(this.out(ctx));
-      const room = ctx.createConvolver();
-      room.buffer = this.roomImpulse(ctx);
-      const wet = ctx.createGain();
-      wet.gain.value = 0.18;
-      drive.connect(room).connect(wet).connect(out);
+      const top = this.latinChain(ctx);
       for (const h of o.drums) {
-        if (h.time < a0 || h.time >= b0) continue;
+        if (!inStep(h.time)) continue;
         this.latinDrum(ctx, top, h, at + (h.time - a0));
       }
     } else if (o.drums.length > 0 && o.drumStyle === 'lofi') {
       // Everything through a dull, slightly driven "tape": no sharp highs, rounded peaks.
-      const tape = ctx.createBiquadFilter();
-      // A dark kit is heard through a wall: the top closes down to about 2.4 kHz and the low end fills out.
-      const dark = Math.max(0, Math.min(1, o.drumDark ?? 0));
-      tape.type = 'lowpass';
-      tape.frequency.value = 8200 * Math.pow(2400 / 8200, dark);
-      tape.Q.value = 0.5;
-      const warmth = ctx.createBiquadFilter();
-      warmth.type = 'lowshelf';
-      warmth.frequency.value = 140;
-      warmth.gain.value = 3.5 + 2 * dark;
-      const drive = ctx.createWaveShaper();
-      drive.curve = this.warmCurve();
-      drive.oversample = '2x';
-      const out = ctx.createGain();
-      // Sit with the recording: a loud take gets a louder kit.
-      out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.8 * Math.sqrt(backing);
-      // Take out the boxy low-mids that make a small kit sound like cardboard.
-      const box = ctx.createBiquadFilter();
-      box.type = 'peaking';
-      box.frequency.value = 430;
-      box.Q.value = 0.9;
-      box.gain.value = -5;
-      tape.connect(box).connect(warmth).connect(drive).connect(out).connect(this.out(ctx));
+      const { tape, out } = this.lofiChain(ctx, o);
       for (const h of o.drums) {
-        if (h.time < a0 || h.time >= b0) continue;
+        if (!inStep(h.time)) continue;
         this.lofiDrum(ctx, tape, h, at + (h.time - a0));
       }
       // A quiet bed of hiss under it all, which also hides the cuts between phrases.
-      const hiss = ctx.createBufferSource();
-      hiss.buffer = this.noiseBuffer(ctx);
-      hiss.loop = true;
-      const band = ctx.createBiquadFilter();
-      band.type = 'bandpass';
-      band.frequency.value = 2400;
-      band.Q.value = 0.4;
-      const quiet = ctx.createGain();
-      const len = b0 - a0;
-      quiet.gain.setValueAtTime(0, at);
-      quiet.gain.linearRampToValueAtTime(0.012, at + 0.05);
-      quiet.gain.setValueAtTime(0.012, at + Math.max(0.05, len - 0.05));
-      quiet.gain.linearRampToValueAtTime(0, at + len);
-      hiss.connect(band).connect(quiet).connect(out);
-      hiss.start(at);
-      hiss.stop(at + len + 0.02);
-      nodes.push(hiss);
+      if (first) {
+        const hiss = ctx.createBufferSource();
+        hiss.buffer = this.noiseBuffer(ctx);
+        hiss.loop = true;
+        const band = ctx.createBiquadFilter();
+        band.type = 'bandpass';
+        band.frequency.value = 2400;
+        band.Q.value = 0.4;
+        const quiet = ctx.createGain();
+        const len = b0 - a0;
+        quiet.gain.setValueAtTime(0, at);
+        quiet.gain.linearRampToValueAtTime(0.012, at + 0.05);
+        quiet.gain.setValueAtTime(0.012, at + Math.max(0.05, len - 0.05));
+        quiet.gain.linearRampToValueAtTime(0, at + len);
+        hiss.connect(band).connect(quiet).connect(out);
+        hiss.start(at);
+        hiss.stop(at + len + 0.02);
+        this.nodes.push(hiss);
+      }
     } else if (o.drums.length > 0) {
-      const bus = ctx.createGain();
-      bus.gain.value = 0.55;
-      bus.connect(this.out(ctx));
+      if (!fx.plain) {
+        fx.plain = ctx.createGain();
+        fx.plain.gain.value = 0.55;
+        fx.plain.connect(this.out(ctx));
+      }
+      const bus = fx.plain;
       for (const h of o.drums) {
-        if (h.time < a0 || h.time >= b0) continue;
+        if (!inStep(h.time)) continue;
         this.drum(ctx, bus, h, at + (h.time - a0));
       }
     }
 
     if (o.chords.length > 0 && o.chordStyle === 'floaty') {
-      // A warm electric piano played by a hand: soft drive, a slow stereo sway
-      // (the classic suitcase tremolo) and a small room. Tails ring past each change.
-      const bus = ctx.createBiquadFilter();
-      bus.type = 'lowpass';
-      bus.frequency.value = o.keysTone ?? 2800;
-      bus.Q.value = 0.4;
-      const drive = ctx.createWaveShaper();
-      drive.curve = this.warmCurve();
-      drive.oversample = '2x';
-      const sway = ctx.createStereoPanner();
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 3.1;
-      const depth = ctx.createGain();
-      depth.gain.value = 0.28;
-      lfo.connect(depth).connect(sway.pan);
-      lfo.start(at);
-      lfo.stop(at + (b0 - a0) + 8);
-      nodes.push(lfo);
-      const dry = ctx.createGain();
-      dry.gain.value = 0.85;
-      const wet = ctx.createGain();
-      wet.gain.value = 0.3;
-      const verb = ctx.createConvolver();
-      verb.buffer = this.roomImpulse(ctx);
-      const breathe = ctx.createGain();
-      breathe.gain.value = 0.93;
-      const swell = ctx.createOscillator();
-      swell.frequency.value = 4.3;
-      const swellDepth = ctx.createGain();
-      swellDepth.gain.value = 0.07;
-      swell.connect(swellDepth).connect(breathe.gain);
-      swell.start(at);
-      swell.stop(at + (b0 - a0) + 8);
-      nodes.push(swell);
-      bus.connect(drive).connect(breathe).connect(sway);
-      const level = ctx.createGain();
-      level.gain.value = this.keysLevel();
-      const limit = ctx.createDynamicsCompressor();
-      limit.threshold.value = -8;
-      limit.knee.value = 6;
-      limit.ratio.value = 12;
-      limit.attack.value = 0.003;
-      limit.release.value = 0.15;
-      level.connect(limit).connect(band);
-      sway.connect(dry).connect(level);
-      sway.connect(verb).connect(wet).connect(level);
+      const bus = this.keysChain(ctx, o);
       const beat = 60 / o.bpm;
       o.chords.forEach((c) => {
         const end = Math.min(b0, c.start + c.duration);
-        if (end <= a0 || c.start >= b0) return;
+        if (end <= a0 || c.start >= b0 || !inStep(Math.max(a0, c.start))) return;
         const b = at + (end - a0);
         const rnd = Math.random; // a fresh hand every time, every loop pass included
         const hz = (m: number): number => mtof(m, o.backingTuningCents);
@@ -975,14 +1118,17 @@ export class Player {
         touch(c.bass, c.start + rnd() * 0.01, force * (0.9 + 0.12 * rnd()));
       });
     } else if (o.chords.length > 0) {
-      const pad = ctx.createBiquadFilter();
-      pad.type = 'lowpass';
-      pad.frequency.value = 1400;
-      pad.Q.value = 0.5;
-      pad.connect(this.out(ctx));
+      if (!fx.pad) {
+        fx.pad = ctx.createBiquadFilter();
+        fx.pad.type = 'lowpass';
+        fx.pad.frequency.value = 1400;
+        fx.pad.Q.value = 0.5;
+        fx.pad.connect(this.out(ctx));
+      }
+      const pad = fx.pad;
       for (const c of o.chords) {
         const end = Math.min(b0, c.start + c.duration);
-        if (end <= a0 || c.start >= b0) continue;
+        if (end <= a0 || c.start >= b0 || !inStep(Math.max(a0, c.start))) continue;
         const a = at + Math.max(0, c.start - a0);
         const b = at + (end - a0);
         // Pad: two slightly detuned saws per chord tone.
@@ -1005,32 +1151,12 @@ export class Player {
 
     if (o.comp?.length) {
       // The montuno: the same electric piano, but bright, dry and stabbed short. The bass is its left hand, held.
-      const bus = ctx.createBiquadFilter();
-      bus.type = 'lowpass';
-      bus.frequency.value = o.keysTone ?? 5200;
-      bus.Q.value = 0.4;
-      const drive = ctx.createWaveShaper();
-      drive.curve = this.warmCurve();
-      drive.oversample = '2x';
-      const level = ctx.createGain();
-      level.gain.value = this.keysLevel() * 0.65;
-      const limit = ctx.createDynamicsCompressor();
-      limit.threshold.value = -8;
-      limit.knee.value = 6;
-      limit.ratio.value = 12;
-      limit.attack.value = 0.003;
-      limit.release.value = 0.15;
-      const verb = ctx.createConvolver();
-      verb.buffer = this.roomImpulse(ctx);
-      const wet = ctx.createGain();
+      const bus = this.compChain(ctx, o);
       const sound = o.compSound ?? 'keys';
-      wet.gain.value = sound === 'pad' ? 0.42 : sound === 'pluck' ? 0.3 : 0.22;
-      bus.connect(drive).connect(level).connect(limit).connect(band);
-      drive.connect(verb).connect(wet).connect(level);
       for (const n of o.comp) {
         // A long held note that began before this pass is picked up where the pass starts.
         const held = n.duration > 1 && n.start < a0 && n.start + n.duration > a0 + 0.3;
-        if ((n.start < a0 && !held) || n.start >= b0) continue;
+        if ((n.start < a0 && !held) || n.start >= b0 || !inStep(Math.max(a0, n.start))) continue;
         const t = at + Math.max(0, n.start - a0) + Math.random() * 0.006;
         const stop = at + (n.start + n.duration - a0);
         const vel = Math.max(0.12, Math.min(1, n.velocity * (0.9 + 0.2 * Math.random())));
@@ -1043,7 +1169,7 @@ export class Player {
 
     if (o.click) {
       for (const b of beatTimes(o.bpm, o.firstBeatMs, this.duration)) {
-        if (b.time < a0 || b.time >= b0) continue;
+        if (!inStep(b.time)) continue;
         const t = at + (b.time - a0);
         const down = ((b.index % o.beatsPerBar) + o.beatsPerBar) % o.beatsPerBar === 0;
         const osc = ctx.createOscillator();
@@ -1055,7 +1181,7 @@ export class Player {
         osc.connect(g).connect(this.out(ctx));
         osc.start(t);
         osc.stop(t + 0.06);
-        nodes.push(osc);
+        this.nodes.push(osc);
       }
     }
 
@@ -1506,11 +1632,12 @@ export class Player {
     this.stopRain();
     this.stopCrackle();
     if (this.playing && keepPosition) this.stopped = this.position;
-    if (this.timer) {
-      clearInterval(this.timer);
-      clearTimeout(this.timer);
-    }
+    if (this.timer) clearInterval(this.timer);
+    if (this.endTimer) clearTimeout(this.endTimer);
     this.timer = null;
+    this.endTimer = null;
+    this.cursor = null;
+    this.looping = null;
     for (const seg of this.segments) {
       for (const n of seg.nodes) {
         try {
