@@ -4,6 +4,20 @@ import { beatTimes } from '../model';
 import type { Chord, DrumHit } from '../music/arrange';
 import type { CompNote } from '../music/groove';
 
+/**
+ * Phones get a lighter sound engine: the audio runs at 32 kHz instead of 48, every room shares one
+ * reverb, the drive isn't oversampled and piano notes skip their own filter. Close to the same
+ * sound, a fraction of the work, so a phone keeps up instead of crackling.
+ * `?lite=1` / `?lite=0` in the address forces it on or off.
+ */
+export const LITE = ((): boolean => {
+  if (typeof navigator === 'undefined' || typeof location === 'undefined') return false;
+  const force = new URLSearchParams(location.search).get('lite');
+  if (force === '1' || force === '0') return force === '1';
+  const ua = navigator.userAgent;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+})();
+
 const mtof = (midi: number, cents: number): number => 440 * Math.pow(2, (midi - 69 + cents / 100) / 12);
 
 export interface PlayNote {
@@ -92,6 +106,14 @@ export class Player {
   private live(): AudioContext {
     // 'playback': bigger audio buffers. Phones can't keep up with tiny ones and the sound crackles;
     // the extra delay is reported in `latency`, so layers still line up.
+    // Android only: iPhones have been known to distort when asked for a rate their hardware doesn't run at.
+    if (!this.ctx && LITE && !/iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent)) {
+      try {
+        this.ctx = new AudioContext({ latencyHint: 'playback', sampleRate: 32000 });
+      } catch {
+        // This browser won't run at that rate: its own rate, then.
+      }
+    }
     this.ctx ??= new AudioContext({ latencyHint: 'playback' });
     return this.ctx;
   }
@@ -377,7 +399,8 @@ export class Player {
     const touch = ctx.createBiquadFilter();
     touch.type = 'lowpass';
     touch.frequency.value = 900 + 5200 * vel;
-    src.connect(touch).connect(env).connect(dest);
+    if (LITE) src.connect(env).connect(dest);
+    else src.connect(touch).connect(env).connect(dest);
     src.start(start);
     src.stop(hold + damp * 6 + 0.1);
     this.nodes.push(src);
@@ -561,12 +584,12 @@ export class Player {
     const makeup = ctx.createGain();
     makeup.gain.value = 1.2;
     input.connect(rumble).connect(box).connect(air).connect(level).connect(makeup).connect(this.out(ctx));
-    const room = ctx.createConvolver();
-    room.buffer = this.roomImpulse(ctx);
+    const room = LITE ? this.sharedRoom(ctx) : this.roomNode(ctx);
+    if (!LITE) room.connect(this.out(ctx));
     const wet = ctx.createGain();
     wet.gain.value = 0.07;
     this.voiceWet = wet;
-    makeup.connect(room).connect(wet).connect(this.out(ctx));
+    makeup.connect(wet).connect(room);
     // The echo (off unless asked for): dull repeats that feed back into themselves and into the room.
     const send = ctx.createGain();
     send.gain.value = 0;
@@ -616,11 +639,12 @@ export class Player {
     const tail = 3.5;
     const rate = this.ctx?.sampleRate === 48000 ? 48000 : 44100;
     const off = new OfflineAudioContext(2, Math.ceil((lead + len * times + tail) * rate), rate);
-    const keep = { master: this.master, fx: this.fx, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
+    const keep = { master: this.master, fx: this.fx, shared: this.shared, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
     try {
       this.rendering = off;
       this.master = null;
       this.fx = null;
+      this.shared = null;
       this.voiceIn = null;
       this.crackle = null;
       this.samples = samples;
@@ -699,6 +723,11 @@ export class Player {
     this.cursor = { seg: this.pass(from, loop ? loop.end : this.duration, t0), t: from };
     this.pump();
     this.timer = setInterval(() => this.pump(), 200);
+    if (!this.pumpOnHide) {
+      // Top the queue up the moment the page is hidden, before timers slow down.
+      this.pumpOnHide = () => this.pump();
+      document.addEventListener('visibilitychange', this.pumpOnHide);
+    }
     if (!loop) {
       this.endTimer = setTimeout(() => {
         this.stop(false);
@@ -710,8 +739,10 @@ export class Player {
 
   /** How far ahead (s) sound is queued while playing, and in steps of how long. */
   private static readonly AHEAD = 2.5;
+  private static readonly AHEAD_HIDDEN = 12;
   private static readonly STEP = 1;
   private endTimer: ReturnType<typeof setTimeout> | null = null;
+  private pumpOnHide: (() => void) | null = null;
   private looping: { start: number; end: number } | null = null;
   /** Where queuing has got to: the pass being filled, and the take time it is filled up to. */
   private cursor: { seg: Segment; t: number } | null = null;
@@ -727,7 +758,10 @@ export class Player {
   private pump(): void {
     const ctx = this.ctx;
     if (!ctx || !this.playing) return;
-    const until = ctx.currentTime + Player.AHEAD;
+    // Screen off / app in the background: timers slow to about once a second (or less), so queue
+    // well ahead to keep the music going until they come round again.
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    const until = ctx.currentTime + (hidden ? Player.AHEAD_HIDDEN : Player.AHEAD);
     while (this.cursor) {
       const { seg, t } = this.cursor;
       if (seg.at + (t - seg.start) > until) break;
@@ -754,10 +788,10 @@ export class Player {
   private fx: {
     ctx: BaseAudioContext;
     band: GainNode;
-    keys?: { bus: BiquadFilterNode; level: GainNode };
+    keys?: { bus: BiquadFilterNode; level: GainNode; wet: GainNode };
     comp?: { bus: BiquadFilterNode; level: GainNode; wet: GainNode };
     lofi?: { tape: BiquadFilterNode; warmth: BiquadFilterNode; out: GainNode };
-    latin?: { top: BiquadFilterNode; out: GainNode };
+    latin?: { top: BiquadFilterNode; out: GainNode; wet: GainNode };
     notes?: BiquadFilterNode;
     plain?: GainNode;
     pad?: BiquadFilterNode;
@@ -783,7 +817,7 @@ export class Player {
   private warmShaper(ctx: BaseAudioContext): WaveShaperNode {
     const drive = ctx.createWaveShaper();
     drive.curve = this.warmCurve();
-    drive.oversample = '2x';
+    drive.oversample = LITE ? 'none' : '2x';
     return drive;
   }
 
@@ -791,6 +825,34 @@ export class Player {
     const room = ctx.createConvolver();
     room.buffer = this.roomImpulse(ctx);
     return room;
+  }
+
+  private shared: { ctx: BaseAudioContext; room: ConvolverNode } | null = null;
+
+  /** Phones: the one reverb every part sends to (mono in, so half the work of a stereo one). */
+  private sharedRoom(ctx: BaseAudioContext): ConvolverNode {
+    if (this.shared?.ctx === ctx) return this.shared.room;
+    const room = this.roomNode(ctx);
+    try {
+      room.channelCount = 1;
+      room.channelCountMode = 'explicit';
+    } catch {
+      // Older browsers: stereo in.
+    }
+    room.connect(this.out(ctx));
+    this.shared = { ctx, room };
+    return room;
+  }
+
+  /**
+   * `from` into a room, returned through `wet`. Laptop: its own room, then `wet`, into `into`.
+   * Phone: `wet` into the shared room, so the caller sets `wet` to include `into`'s level.
+   */
+  private roomSend(ctx: BaseAudioContext, from: AudioNode, into: AudioNode): GainNode {
+    const wet = ctx.createGain();
+    if (LITE) from.connect(wet).connect(this.sharedRoom(ctx));
+    else from.connect(this.roomNode(ctx)).connect(wet).connect(into);
+    return wet;
   }
 
   private limiter(ctx: BaseAudioContext): DynamicsCompressorNode {
@@ -823,8 +885,6 @@ export class Player {
       lfo.start();
       const dry = ctx.createGain();
       dry.gain.value = 0.85;
-      const wet = ctx.createGain();
-      wet.gain.value = 0.3;
       const breathe = ctx.createGain();
       breathe.gain.value = 0.93;
       const swell = ctx.createOscillator();
@@ -837,11 +897,13 @@ export class Player {
       const level = ctx.createGain();
       level.connect(this.limiter(ctx)).connect(fx.band);
       sway.connect(dry).connect(level);
-      sway.connect(this.roomNode(ctx)).connect(wet).connect(level);
-      fx.keys = { bus, level };
+      const wet = this.roomSend(ctx, sway, level);
+      fx.keys = { bus, level, wet };
     }
+    const level = this.keysLevel();
     fx.keys.bus.frequency.value = o.keysTone ?? 2800;
-    fx.keys.level.gain.value = this.keysLevel();
+    fx.keys.level.gain.value = level;
+    fx.keys.wet.gain.value = 0.3 * (LITE ? level : 1);
     return fx.keys.bus;
   }
 
@@ -854,15 +916,15 @@ export class Player {
       bus.Q.value = 0.4;
       const drive = this.warmShaper(ctx);
       const level = ctx.createGain();
-      const wet = ctx.createGain();
       bus.connect(drive).connect(level).connect(this.limiter(ctx)).connect(fx.band);
-      drive.connect(this.roomNode(ctx)).connect(wet).connect(level);
+      const wet = this.roomSend(ctx, drive, level);
       fx.comp = { bus, level, wet };
     }
     const sound = o.compSound ?? 'keys';
     fx.comp.bus.frequency.value = o.keysTone ?? 5200;
-    fx.comp.level.gain.value = this.keysLevel() * 0.65;
-    fx.comp.wet.gain.value = sound === 'pad' ? 0.42 : sound === 'pluck' ? 0.3 : 0.22;
+    const level = this.keysLevel() * 0.65;
+    fx.comp.level.gain.value = level;
+    fx.comp.wet.gain.value = (sound === 'pad' ? 0.42 : sound === 'pluck' ? 0.3 : 0.22) * (LITE ? level : 1);
     return fx.comp.bus;
   }
 
@@ -907,12 +969,12 @@ export class Player {
       const drive = this.warmShaper(ctx);
       const out = ctx.createGain();
       top.connect(drive).connect(out).connect(this.out(ctx));
-      const wet = ctx.createGain();
-      wet.gain.value = 0.18;
-      drive.connect(this.roomNode(ctx)).connect(wet).connect(out);
-      fx.latin = { top, out };
+      const wet = this.roomSend(ctx, drive, out);
+      fx.latin = { top, out, wet };
     }
-    fx.latin.out.gain.value = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.55;
+    const level = Math.max(0.5, Math.min(1.5, this.voiceLoudness() / 0.16)) * 0.55;
+    fx.latin.out.gain.value = level;
+    fx.latin.wet.gain.value = 0.18 * (LITE ? level : 1);
     return fx.latin.top;
   }
 
@@ -1223,7 +1285,8 @@ export class Player {
   /** Stereo decaying-noise impulse: a soft ~2 s room. */
   private roomImpulse(ctx: BaseAudioContext): AudioBuffer {
     if (this.room && this.room.sampleRate === ctx.sampleRate) return this.room;
-    const len = Math.round(2.2 * ctx.sampleRate);
+    // Phones: 1.4 s. The tail past that is under -25 dB and a long reverb is the costliest thing here.
+    const len = Math.round((LITE ? 1.4 : 2.2) * ctx.sampleRate);
     const buf = ctx.createBuffer(2, len, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
       const d = buf.getChannelData(ch);
