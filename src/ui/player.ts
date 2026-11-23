@@ -62,7 +62,7 @@ export interface PlayOptions {
    * a duller top end, and the band ducking a little under each kick.
    */
   dust?: number;
-  /** Voice effects turned up: 0 as set, 1 a big room and echo, 2 that and a narrow lo-fi voice. */
+  /** Voice effects turned up: 0 as set, 1 a bit of room and echo, 2 that and a narrow lo-fi voice. */
   voiceFx?: number;
   /** How much room (reverb) is put on the recorded voice, 0–1. Default 0.07: barely there. */
   voiceRoom?: number;
@@ -620,7 +620,7 @@ export class Player {
   private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
     this.voiceBus(ctx);
     const fx = Math.max(0, Math.min(2, Math.round(o.voiceFx ?? 0)));
-    this.voiceWet?.gain.setTargetAtTime(Math.max(o.voiceRoom ?? 0.07, [0, 0.4, 0.5][fx]), ctx.currentTime, 0.05);
+    this.voiceWet?.gain.setTargetAtTime(Math.max(o.voiceRoom ?? 0.07, [0, 0.15, 0.18][fx]), ctx.currentTime, 0.05);
     if (this.voiceTone) {
       const t = ctx.currentTime;
       this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 320 : 20, t);
@@ -633,7 +633,7 @@ export class Player {
       while (beat < 0.5) beat *= 2;
       while (beat > 1) beat /= 2;
       this.voiceEcho.delay.delayTime.setValueAtTime(0.75 * beat, ctx.currentTime);
-      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, Math.max(o.voiceEcho ?? 0, [0, 0.32, 0.42][fx]))), ctx.currentTime, 0.05);
+      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, Math.max(o.voiceEcho ?? 0, [0, 0.1, 0.14][fx]))), ctx.currentTime, 0.05);
     }
   }
 

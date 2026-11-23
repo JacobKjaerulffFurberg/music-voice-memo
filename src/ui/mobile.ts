@@ -261,7 +261,7 @@ export function mountMobile(root: HTMLElement): void {
     flashHint(CHILL[current.chill]);
   });
   // Voice effects (on the melody, always there): tap to crank them, per take.
-  const VFX = ['voice: natural', 'voice: big room + echo', 'voice: lo-fi'];
+  const VFX = ['voice: natural', 'voice: room + echo', 'voice: lo-fi'];
   const vfxOf = (r: { voiceFx?: number } | null): number => Math.max(0, Math.min(2, r?.voiceFx ?? 0));
   $<HTMLButtonElement>('m-vfx').addEventListener('click', () => {
     if (!current) return;
