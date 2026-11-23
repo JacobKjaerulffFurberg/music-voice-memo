@@ -25,6 +25,7 @@ import { deleteRecording, listRecordings, loadRecording, saveRecording } from '.
 import { Player, type PlayOptions } from './player';
 import { tuneVoice } from '../music/tune';
 import { encodeMp3, fileName, handOver, isNativeApp } from '../export/mp3';
+import { playScene } from './cozy';
 import { buildLabel, checkForUpdate, installApk, installWebUpdate, markAppReady, type UpdateState } from '../app-update';
 
 /** Colours of the sung layers' lines and chips, in order. */
@@ -60,7 +61,7 @@ const TEMPLATE = `
   </header>
 
   <section class="m-stage" id="m-stage">
-    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas><div class="m-tag" aria-hidden="true"><b>lo-fi</b><span>your life</span></div></div>
+    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas><div class="m-room" aria-hidden="true"><canvas class="pixel" id="m-room"></canvas><b>lo-fi <span>your life</span></b></div></div>
     <button class="m-rec" id="m-rec" aria-label="Record"><span></span></button>
     <div class="m-stage-bot">
       <div class="m-live" id="m-live"></div>
@@ -484,10 +485,17 @@ export function mountMobile(root: HTMLElement): void {
     requestAnimationFrame(drawRoll);
   }
 
+  const room = playScene($<HTMLCanvasElement>('m-room'));
+  document.addEventListener('visibilitychange', () => (document.hidden || view !== 'idle' ? room.stop() : room.start()));
+  stage.dataset.view = view;
+  if (view === 'idle') room.start();
   function setView(v: View): void {
     view = v;
     stage.hidden = v === 'result';
     stage.dataset.view = v;
+    // The little room only plays while it can be seen.
+    if (v === 'idle' && !document.hidden) room.start();
+    else room.stop();
     result.hidden = v !== 'result';
     recBtn.classList.toggle('on', v === 'recording');
     recBtn.hidden = v === 'analyzing';
