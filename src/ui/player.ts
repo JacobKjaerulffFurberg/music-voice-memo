@@ -5,8 +5,7 @@ import type { Chord, DrumHit } from '../music/arrange';
 import type { CompNote } from '../music/groove';
 
 /**
- * Phones get a lighter sound engine: the audio runs at 32 kHz instead of 48, every room shares one
- * reverb, the drive isn't oversampled and piano notes skip their own filter. Close to the same
+ * Phones get a lighter sound engine: every room shares one shorter, mono-in reverb, the drive isn't oversampled and piano notes skip their own filter. Close to the same
  * sound, a fraction of the work, so a phone keeps up instead of crackling.
  * `?lite=1` / `?lite=0` in the address forces it on or off.
  */
@@ -106,14 +105,10 @@ export class Player {
   private live(): AudioContext {
     // 'playback': bigger audio buffers. Phones can't keep up with tiny ones and the sound crackles;
     // the extra delay is reported in `latency`, so layers still line up.
-    // Android only: iPhones have been known to distort when asked for a rate their hardware doesn't run at.
-    if (!this.ctx && LITE && !/iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent)) {
-      try {
-        this.ctx = new AudioContext({ latencyHint: 'playback', sampleRate: 32000 });
-      } catch {
-        // This browser won't run at that rate: its own rate, then.
-      }
-    }
+    // Always the phone's own sample rate: asking for another one (while the mic is open at its rate)
+    // left some phones silent. A context the phone has closed is replaced; everything built on it
+    // is keyed to the context and rebuilds itself.
+    if (this.ctx?.state === 'closed') this.ctx = null;
     this.ctx ??= new AudioContext({ latencyHint: 'playback' });
     return this.ctx;
   }
@@ -628,7 +623,7 @@ export class Player {
    * over (or the whole take once, without a loop), then a few seconds for the last chord, the
    * room and the rain to ring out and fade. Nothing is heard while it renders.
    */
-  async render(samples: Float32Array, sampleRate: number, o: PlayOptions, passes = 2): Promise<AudioBuffer> {
+  async render(samples: Float32Array, sampleRate: number, o: PlayOptions, passes = 2, onProgress?: (done: number) => void): Promise<AudioBuffer> {
     this.stop();
     const dur = samples.length / sampleRate;
     const loop = o.loop && o.loop.end - o.loop.start >= 0.05 ? o.loop : null;
@@ -670,7 +665,11 @@ export class Player {
       this.voiceSends(off, o);
       this.resetBand(off, o);
       for (let p = 0; p < times; p++) this.schedule(this.pass(a, b, lead + p * len), a, b);
-      const buf = await off.startRendering();
+      // How far the file has got, for a progress bar (the context's clock runs ahead as it renders).
+      const total = off.length / off.sampleRate;
+      const watch = onProgress ? setInterval(() => onProgress(Math.min(1, off.currentTime / total)), 100) : null;
+      const buf = await off.startRendering().finally(() => watch && clearInterval(watch));
+      onProgress?.(1);
       // The ending: everything still ringing fades away over the last two seconds.
       const fade = Math.min(buf.length, Math.round(2 * rate));
       for (let ch = 0; ch < buf.numberOfChannels; ch++) {
@@ -692,7 +691,7 @@ export class Player {
   async play(samples: Float32Array, sampleRate: number, o: PlayOptions): Promise<void> {
     this.stop();
     const ctx = this.live();
-    if (ctx.state === 'suspended') await ctx.resume();
+    if (ctx.state !== 'running') await ctx.resume().catch(() => undefined); // 'suspended', or iOS 'interrupted' after a call
     this.samples = samples;
     this.sampleRate = sampleRate;
     this.opts = o;
@@ -1252,7 +1251,7 @@ export class Player {
   /** Short audition blip for note editing (independent of playback). */
   async preview(midi: number, tuningCents: number): Promise<void> {
     const ctx = this.live();
-    if (ctx.state === 'suspended') await ctx.resume();
+    if (ctx.state !== 'running') await ctx.resume().catch(() => undefined); // 'suspended', or iOS 'interrupted' after a call
     const t = ctx.currentTime + 0.01;
     const osc = ctx.createOscillator();
     osc.type = 'triangle';
@@ -1269,7 +1268,7 @@ export class Player {
   /** Audition a chord on the soft keys (independent of playback). */
   async previewChord(voicing: number[], bass: number, tuningCents: number): Promise<void> {
     const ctx = this.live();
-    if (ctx.state === 'suspended') await ctx.resume();
+    if (ctx.state !== 'running') await ctx.resume().catch(() => undefined); // 'suspended', or iOS 'interrupted' after a call
     if (!this.keysNow) await Promise.race([this.loadKeys(ctx), new Promise((r) => setTimeout(r, 2500))]);
     const t = ctx.currentTime + 0.02;
     const keep = this.nodes;

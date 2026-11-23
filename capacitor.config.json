@@ -1,0 +1,13 @@
+{
+  "appId": "app.lofiyourlife.hum",
+  "appName": "Lo-fi Your Life",
+  "webDir": "dist-app",
+  "backgroundColor": "#141217",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#141217"
+  }
+}

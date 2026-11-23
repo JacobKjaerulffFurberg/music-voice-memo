@@ -24,7 +24,7 @@ import { velocityOf } from '../analysis/velocity';
 import { deleteRecording, listRecordings, loadRecording, saveRecording } from '../storage/db';
 import { Player, type PlayOptions } from './player';
 import { tuneVoice } from '../music/tune';
-import { encodeMp3, fileName, handOver } from '../export/mp3';
+import { encodeMp3, fileName, handOver, isNativeApp } from '../export/mp3';
 
 /** Colours of the sung layers' lines and chips, in order. */
 const LAYER_COLOURS = ['--accent', '--keys', '--note'];
@@ -34,6 +34,7 @@ const LOAD_TUNE = [0, 8, 16, 8, 20, 12, 4, 14, 24, 10];
 
 /** Height of the chord-name band along the top of the melody (a touch target). */
 const HEAD = 44;
+
 
 type View = 'idle' | 'recording' | 'analyzing' | 'result';
 
@@ -58,7 +59,7 @@ const TEMPLATE = `
   </header>
 
   <section class="m-stage" id="m-stage">
-    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas></div>
+    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas><div class="m-tag" aria-hidden="true"><b>lo-fi</b><span>your life</span></div></div>
     <button class="m-rec" id="m-rec" aria-label="Record"><span></span></button>
     <div class="m-stage-bot">
       <div class="m-live" id="m-live"></div>
@@ -99,6 +100,10 @@ const TEMPLATE = `
       <button class="m-toggle" id="t-rain" aria-pressed="false">Rain</button>
       <button class="m-toggle" id="t-loop" aria-pressed="true">Loop</button>
     </div>
+    <div class="m-track m-more">
+      <button class="m-toggle" id="t-essentia" aria-pressed="true" aria-label="Essentia: extra key and tempo reading from the raw audio">Essentia</button>
+      <button class="m-toggle" id="m-relisten" aria-label="Listen to this take again with the current settings">Re-listen</button>
+    </div>
     <label class="m-track m-more m-dust"><span>Dust</span><input type="range" id="m-dust" min="0" max="100" step="1" aria-label="Dust"></label>
     <div class="m-track m-more" id="m-layers" hidden></div>
     <div class="m-controls">
@@ -113,6 +118,14 @@ const TEMPLATE = `
   </div>
   <div class="m-sheet" id="m-picker" hidden>
     <div class="m-sheet-panel"><div class="m-sheet-grip"></div><div id="m-picker-body"></div></div>
+  </div>
+  <div class="m-busy" id="m-busy" hidden>
+    <div class="m-load" id="m-busy-load"></div>
+    <p class="m-hint" id="m-busy-word"></p>
+    <div class="m-busy-acts" id="m-busy-acts" hidden>
+      <button class="m-busy-go" id="m-busy-share">Share</button>
+      <button class="m-busy-x" id="m-busy-done">Done</button>
+    </div>
   </div>
   <div class="m-sheet" id="m-keys" hidden>
     <div class="m-sheet-panel"><div class="m-sheet-grip"></div><div id="m-keys-body"></div></div>
@@ -156,6 +169,8 @@ function moved(n: Note, map: (t: number) => number): Note {
 
 export function mountMobile(root: HTMLElement): void {
   root.innerHTML = TEMPLATE;
+  // The app is the phone page only: no desktop editor to open.
+  if (isNativeApp()) root.querySelector('.m-daw')?.remove();
   const $ = <T extends HTMLElement>(id: string): T => root.querySelector<T>(`#${id}`) as T;
   const stage = $<HTMLElement>('m-stage');
   const result = $<HTMLElement>('m-result');
@@ -295,6 +310,30 @@ export function mountMobile(root: HTMLElement): void {
     refresh();
   });
 
+  // Essentia (in More): the WASM library's extra reading of key and tempo from the raw audio.
+  // Off = our own analysis only (smaller, about twice as fast). Applies to the next listen; Re-listen redoes this take.
+  const essBtn = $<HTMLButtonElement>('t-essentia');
+  const essentiaOn = (): boolean => on(essBtn);
+  try {
+    essBtn.setAttribute('aria-pressed', String(localStorage.getItem('hum-essentia') !== 'off'));
+  } catch {
+    // No storage: on.
+  }
+  essBtn.addEventListener('click', () => {
+    const now = !essentiaOn();
+    essBtn.setAttribute('aria-pressed', String(now));
+    try {
+      localStorage.setItem('hum-essentia', now ? 'on' : 'off');
+    } catch {
+      // Private mode: just not remembered.
+    }
+  });
+  $<HTMLButtonElement>('m-relisten').addEventListener('click', () => {
+    if (!current || view === 'analyzing') return;
+    stopPlayback();
+    void analyze(current.analysis?.quality === 'high' ? 'high' : 'normal');
+  });
+
   // "More": key, tempo, the chord chips and the part toggles stay hidden until asked for.
   const page = $<HTMLElement>('m');
   const advBtn = $<HTMLButtonElement>('m-adv');
@@ -390,6 +429,7 @@ export function mountMobile(root: HTMLElement): void {
   function setView(v: View): void {
     view = v;
     stage.hidden = v === 'result';
+    stage.dataset.view = v;
     result.hidden = v !== 'result';
     recBtn.classList.toggle('on', v === 'recording');
     recBtn.hidden = v === 'analyzing';
@@ -544,7 +584,7 @@ export function mountMobile(root: HTMLElement): void {
       if (!showing) next();
     };
     try {
-      rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, 'auto', onStage, rec.source ?? 'auto', quality);
+      rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, essentiaOn() ? 'auto' : 'js', onStage, rec.source ?? 'auto', quality);
       delete rec.editedNotes;
       await saveRecording(rec, false).catch(() => undefined);
       // Let the steps still waiting have their turn, then the last notes of the tune land.
@@ -1095,7 +1135,7 @@ export function mountMobile(root: HTMLElement): void {
       c.fillRect(xx, 0, w, g.H);
       c.fillStyle = col.faint;
       c.fillRect(Math.round(xx), 0, 1, g.H);
-      c.font = `600 ${(14 + 4 * lit).toFixed(1)}px system-ui, sans-serif`;
+      c.font = `700 ${(15 + 4 * lit).toFixed(1)}px system-ui, sans-serif`;
       c.fillStyle = `hsl(${hue(ch.root)} ${sat(80)}% 84%)`;
       c.fillText(ch.name, Math.max(6, xx + 7), HEAD / 2, Math.max(12, w - 10));
     }
@@ -1451,19 +1491,66 @@ export function mountMobile(root: HTMLElement): void {
     const name = fileName(current.name);
     exporting = true;
     exportBtn.classList.add('busy');
+    // The same little tune as while listening: one note lands per tenth of the work, the words follow the steps.
+    busy.hidden = false;
+    busyActs.hidden = true;
+    busyWord.classList.remove('ready');
+    busyLoad.innerHTML = LOAD_TUNE.map((y) => `<i style="--y:${y}px"></i>`).join('');
+    const dots = [...busyLoad.querySelectorAll<HTMLElement>('i')];
+    let done = 0;
+    let shown = 0;
+    const word = (w: string): void => {
+      if (busyWord.textContent !== w) busyWord.textContent = w;
+    };
+    word('mixing it down');
+    const tick = setInterval(() => {
+      shown += (done - shown) * 0.12;
+      const n = Math.floor(shown * dots.length + 0.001);
+      dots.forEach((d, k) => {
+        d.classList.toggle('on', k < n);
+        d.classList.toggle('next', k === n);
+      });
+    }, 50);
     void (async () => {
       try {
-        const buf = await player.render(p.samples, p.sampleRate, p.o, 2);
+        // Rendering is most of the work (to 75%), then the MP3.
+        const buf = await player.render(p.samples, p.sampleRate, p.o, 2, (f) => {
+          done = 0.75 * f;
+          if (f > 0.5) word('pressing the vinyl');
+        });
+        word('wrapping your mp3');
         const channels = Array.from({ length: buf.numberOfChannels }, (_, ch) => buf.getChannelData(ch));
-        await handOver(await encodeMp3({ sampleRate: buf.sampleRate, channels }), name);
+        const blob = await encodeMp3({ sampleRate: buf.sampleRate, channels }, 192, (f) => (done = 0.75 + 0.25 * f));
+        done = 1.05;
+        await new Promise((r) => setTimeout(r, 450));
+        // Sharing needs a fresh tap (the one on MP3 is too long ago by now): offer it.
+        word('ready');
+        busyWord.classList.add('ready');
+        busyShare.textContent = isNativeApp() || typeof navigator.canShare === 'function' ? 'Share' : 'Save';
+        busyActs.hidden = false;
+        busyShare.onclick = () => {
+          handOver(blob, name)
+            .then((how) => {
+              if (how !== 'cancelled') busy.hidden = true;
+            })
+            .catch((e: unknown) => word(`couldn't share: ${e instanceof Error ? e.message : String(e)}`));
+        };
       } catch (e) {
+        busy.hidden = true;
         title.textContent = `Couldn't export: ${e instanceof Error ? e.message : String(e)}`;
       } finally {
+        clearInterval(tick);
         exporting = false;
         exportBtn.classList.remove('busy');
       }
     })();
   });
+  const busy = $<HTMLDivElement>('m-busy');
+  const busyLoad = $<HTMLDivElement>('m-busy-load');
+  const busyWord = $<HTMLParagraphElement>('m-busy-word');
+  const busyActs = $<HTMLDivElement>('m-busy-acts');
+  const busyShare = $<HTMLButtonElement>('m-busy-share');
+  $<HTMLButtonElement>('m-busy-done').addEventListener('click', () => (busy.hidden = true));
 
   function stopPlayback(): void {
     if (layering) void finishLayer(false);
