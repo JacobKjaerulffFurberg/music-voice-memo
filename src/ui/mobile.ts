@@ -17,6 +17,7 @@ import { effectiveAnalysis, effectiveSettings, newId, type Layer, type Settings,
 import { chordChoices, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
 import { bossa, DEFAULT_VIBE, dustOf, GENRES, genreOf, grooveDrums, grooveTempo, montuno, pads, VIBES, vibeOf, wearVibe } from '../music/groove';
 import { foldOntoLoop, roughLevel } from '../music/layers';
+import { cancelBleed, findDelay } from '../audio/bleed';
 import { alignToGrid, lofiDownbeat } from '../music/lofi';
 import { takeChords } from '../music/progression';
 import type { Mode } from '../analysis/types';
@@ -575,12 +576,26 @@ export function mountMobile(root: HTMLElement): void {
     if (v === 'idle') {
       live.textContent = '';
       timer.textContent = '';
-      hint.textContent = 'Sing';
+      hint.textContent = IDEAS[0];
       title.textContent = '';
       title.classList.remove('can');
     }
     if (v === 'recording') hint.textContent = '';
   }
+
+  // Idle: the hint drifts slowly between the things you can record.
+  const IDEAS = ['Sing', 'Whistle', 'Hum', 'Play'];
+  let idea = 0;
+  setInterval(() => {
+    if (view !== 'idle' || countIn.length || !IDEAS.includes(hint.textContent ?? '')) return;
+    hint.classList.add('fading');
+    setTimeout(() => {
+      if (view !== 'idle' || !IDEAS.includes(hint.textContent ?? '')) return hint.classList.remove('fading');
+      idea = (idea + 1) % IDEAS.length;
+      hint.textContent = IDEAS[idea];
+      hint.classList.remove('fading');
+    }, 700);
+  }, 3200);
 
   // ---------- recording ----------
   const recorder = new Recorder({
@@ -638,6 +653,7 @@ export function mountMobile(root: HTMLElement): void {
     const { samples, sampleRate } = await recorder.stop();
     if (samples.length < sampleRate * 0.6) {
       tappedBpm = null;
+      pulse = null;
       resetTap();
       setView('idle');
       hint.textContent = 'Too short';
@@ -661,6 +677,7 @@ export function mountMobile(root: HTMLElement): void {
     }
     const bpm = tappedBpm;
     tappedBpm = null;
+    pulse = null;
     resetTap();
     await saveRecording(current).catch(() => undefined);
     await analyze('normal');
@@ -668,6 +685,7 @@ export function mountMobile(root: HTMLElement): void {
       // The tap is a hint: the tempo is read from the singing, near what was tapped.
       const t = tempoNearHint(onsetsFromNotes(current.analysis.notes), bpm);
       current.overrides.bpm = t.bpm;
+      current.tapBpm = bpm;
       if (t.firstBeat !== null) {
         current.overrides.firstBeatMs = Math.round(t.firstBeat * 1000);
         current.overrides.firstBeatAuto = true;
@@ -687,6 +705,25 @@ export function mountMobile(root: HTMLElement): void {
   let countIn: number[] = [];
   /** Tempo for the next take, from the taps (null = let the analysis find it). */
   let tappedBpm: number | null = null;
+  /** The beat the taps set, on clickCtx's clock: the dots keep it while recording. */
+  let pulse: { t0: number; beat: number } | null = null;
+  function keepPulse(): void {
+    if (!pulse || !clickCtx || view !== 'recording') {
+      tapBtn.classList.remove('live');
+      return;
+    }
+    tapBtn.classList.add('live');
+    const n = Math.floor((clickCtx.currentTime - pulse.t0) / pulse.beat + 0.03);
+    const on = ((n % 4) + 4) % 4;
+    if (tapBtn.dataset.n !== String(n)) {
+      tapBtn.dataset.n = String(n);
+      tapDots.forEach((d, i) => d.classList.toggle('hot', i === on));
+      tapBtn.classList.remove('beat');
+      void tapBtn.offsetWidth;
+      tapBtn.classList.add('beat');
+    }
+    requestAnimationFrame(keepPulse);
+  }
   function click(at: number, accent: boolean): void {
     if (!clickCtx) return;
     const o = clickCtx.createOscillator();
@@ -741,6 +778,7 @@ export function mountMobile(root: HTMLElement): void {
     tapBtn.classList.add('counting');
     const t0 = taps[3];
     taps = [];
+    pulse = { t0, beat };
     // Four clicks, then record on the beat after.
     for (let k = 1; k <= 5; k++) {
       const at = t0 + k * beat;
@@ -754,7 +792,7 @@ export function mountMobile(root: HTMLElement): void {
             } else {
               countIn = [];
               tapBtn.classList.remove('counting');
-              void toggleRecord();
+              void toggleRecord().then(() => requestAnimationFrame(keepPulse));
             }
           },
           Math.max(0, (at - (clickCtx?.currentTime ?? 0)) * 1000 - (k === 5 ? 40 : 0)),
@@ -770,7 +808,7 @@ export function mountMobile(root: HTMLElement): void {
       countIn = [];
       tapBtn.classList.remove('counting');
     }
-    void toggleRecord();
+    void toggleRecord().then(() => requestAnimationFrame(keepPulse));
   });
   $<HTMLButtonElement>('m-new').addEventListener('click', async () => {
     if (layering) await finishLayer(false);
@@ -1691,7 +1729,8 @@ export function mountMobile(root: HTMLElement): void {
     const backing = lp && last && last.start + last.duration < lp[1] ? [...chords.slice(0, -1), { ...last, duration: lp[1] - last.start }] : chords;
     // The band: its own (slow) bar on the take's grid, starting where the singing leans on it.
     const genre = genreOf(current);
-    const gBpm = grooveTempo(genre, s.bpm);
+    // Tapped: the band plays at the tempo you felt, fast or slow. Otherwise each style picks its own octave.
+    const gBpm = current.tapBpm ? s.bpm : grooveTempo(genre, s.bpm);
     const gFirst = lofiDownbeat(shown, s.bpm, s.firstBeatMs / 1000, gBpm);
     const end = lp ? lp[1] : rec.samples.length / rec.sampleRate;
     const o: PlayOptions = {
@@ -1877,6 +1916,41 @@ export function mountMobile(root: HTMLElement): void {
   // of the last). Undo, in More, takes it off again.
   const layerBtn = $<HTMLButtonElement>('m-layer');
   const layersEl = $<HTMLDivElement>('m-layers');
+  /** The phone's speaker → mic delay, as last measured from a layer (null: not yet). */
+  function roundTrip(): number | null {
+    try {
+      const v = Number(localStorage.getItem('hum-roundtrip'));
+      return v > 0 && v < 1 ? v : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * What the speakers played while the layer was sung, lined up with the recording as if there
+   * were no delay: recording sample i ↔ take time p0 + (i − preRoll)/sr, folded onto the loop.
+   */
+  async function playedAlong(L: { lp: [number, number]; p0: number }, preRoll: number, n: number, sr: number): Promise<Float32Array | null> {
+    const p = playOptions(L.lp[0], L.lp);
+    if (!p) return null;
+    const len = L.lp[1] - L.lp[0];
+    const u0 = ((((L.p0 - preRoll / sr - L.lp[0]) % len) + len) % len);
+    const passes = Math.ceil((u0 + n / sr) / len) + 2;
+    const buf = await new Player().render(p.samples, p.sampleRate, p.o, passes);
+    const R = buf.sampleRate;
+    const a = buf.getChannelData(0);
+    const b = buf.numberOfChannels > 1 ? buf.getChannelData(1) : a;
+    // Start a pass in, so the room's tail from the pass before is there too.
+    const start = (0.05 + len + u0) * R;
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const t = start + (i * R) / sr;
+      const j = Math.floor(t);
+      if (j + 1 >= a.length) break;
+      const f = t - j;
+      out[i] = 0.5 * ((a[j] + b[j]) * (1 - f) + (a[j + 1] + b[j + 1]) * f);
+    }
+    return out;
+  }
   async function startLayer(): Promise<void> {
     const lp = loopSpan();
     if (!current || !lp || starting || layering) return;
@@ -1889,7 +1963,7 @@ export function mountMobile(root: HTMLElement): void {
       await recorder.start();
       // What is sung now is heard against what left the speakers a moment ago, and reaches us a moment later.
       layering.p0 = player.position;
-      layering.lat = player.latency + 0.02;
+      layering.lat = roundTrip() ?? player.latency + 0.02;
       jam.length = 0;
       layerBtn.classList.add('on');
       layerBtn.setAttribute('aria-label', 'Keep what I sang');
@@ -1921,8 +1995,31 @@ export function mountMobile(root: HTMLElement): void {
       draw();
       return;
     }
+    // Without headphones the mic heard the song too. Find it in the recording: that is the
+    // phone's real delay (remembered for next time), and the song is then taken out again.
+    let voice = x;
+    let lat = L.lat;
+    try {
+      flashHint('cleaning up');
+      const ref = await playedAlong(L, take.preRollSamples, x.length, sr);
+      if (ref) {
+        const fit = Math.min(x.length, Math.round(sr * 12));
+        const d = findDelay(x.subarray(0, fit), ref.subarray(0, fit), sr);
+        if (d.strength > 0.12) {
+          lat = d.sec;
+          try {
+            localStorage.setItem('hum-roundtrip', String(d.sec));
+          } catch {
+            // Not remembered; measured again next time.
+          }
+          voice = cancelBleed(x, ref, Math.round(d.sec * sr));
+        }
+      }
+    } catch {
+      // Keep the recording as it is.
+    }
     // Lay it on the loop: each sample goes where the band was when it was sung, pass over pass.
-    const out = foldOntoLoop(x, sr, L.p0 - L.lp[0] - L.lat - take.preRollSamples / sr, len);
+    const out = foldOntoLoop(voice, sr, L.p0 - L.lp[0] - lat - take.preRollSamples / sr, len);
     (current.layers ??= []).push({ id: newId(), samples: out, sampleRate: sr, start: L.lp[0], trail });
     void saveRecording(current).catch(() => undefined);
     render();
