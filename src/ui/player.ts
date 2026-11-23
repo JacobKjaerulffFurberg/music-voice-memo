@@ -1,5 +1,6 @@
 /** Playback of a recording with an optional click track on the beat grid. */
 
+import { stayAwake } from '../awake';
 import { beatTimes } from '../model';
 import type { Chord, DrumHit } from '../music/arrange';
 import type { CompNote } from '../music/groove';
@@ -715,6 +716,7 @@ export class Player {
     if (loop && (from < loop.start || from >= loop.end)) from = loop.start;
     const t0 = ctx.currentTime + 0.05;
     this.playing = true;
+    stayAwake('playing', true); // no screen sleep while the music plays
     this.resetBand(ctx, o);
     this.looping = loop;
     // Sound is queued a little at a time, a couple of seconds ahead of what is heard: a phone
@@ -1712,6 +1714,7 @@ export class Player {
     }
     this.segments = [];
     this.playing = false;
+    stayAwake('playing', false);
   }
 
   seek(sec: number): void {

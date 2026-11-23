@@ -9,7 +9,7 @@ import { effectiveAnalysis, isChordsTake, type Settings, type StoredRecording } 
 import { chordName, floatChords, keysLift, prefersSharps, revoice, spiceChords, suggestChords, voicePlayedChords, type Chord } from './arrange';
 
 export interface TakeChordOptions {
-  chordsPerBar: 1 | 2 | 'auto';
+  chordsPerBar: 0.5 | 1 | 2 | 'auto';
   /** Chord changes follow the sung note starts instead of the bar line. */
   floaty: boolean;
   /** Seed for the varied chord colours (see spiceChords). Default: the take's own (`wand`), else none. */

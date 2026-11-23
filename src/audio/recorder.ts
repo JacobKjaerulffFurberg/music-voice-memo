@@ -11,6 +11,7 @@
  */
 
 import workletUrl from './recorder-worklet.ts?worker&url';
+import { stayAwake } from '../awake';
 import type { WorkletCommand, WorkletMessage } from './recorder-worklet';
 
 export interface Recording {
@@ -191,6 +192,7 @@ export class Recorder {
     this.chunks = [];
     this.preRollSamples = 0;
     this.recording = true;
+    stayAwake('recording', true); // the screen mustn't sleep mid-take
     if (this.idleTimer) clearTimeout(this.idleTimer);
     await new Promise<void>((resolve) => {
       const t = setTimeout(resolve, 300);
@@ -216,6 +218,7 @@ export class Recorder {
     });
     this.waiters.stopped = undefined;
     this.recording = false;
+    stayAwake('recording', false);
     this.armIdleRelease();
 
     const total = this.chunks.reduce((s, c) => s + c.length, 0);
@@ -236,6 +239,7 @@ export class Recorder {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.graph = null;
     this.recording = false;
+    stayAwake('recording', false);
     try {
       g.source.disconnect();
       g.node.disconnect();

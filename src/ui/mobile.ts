@@ -50,6 +50,7 @@ const ICON = {
   wand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>',
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+  cup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h13v4a6 6 0 0 1-6 6H10a6 6 0 0 1-6-6z"/><path d="M17 11h1.5a2.5 2.5 0 0 1 0 5H16.5"/><path d="M8 3c-.6 1 .6 2 0 3M12 3c-.6 1 .6 2 0 3"/></svg>',
 };
 
 const TEMPLATE = `
@@ -82,6 +83,8 @@ const TEMPLATE = `
       <canvas class="m-melody" id="m-melody"></canvas>
       <div class="m-lays" id="m-lays"></div>
       <button class="m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
+      <button class="m-chill" id="m-chill" aria-label="Chill the chords">${ICON.cup}<span class="m-pips" id="m-chill-pips"></span></button>
+      <div class="m-toast" id="m-toast" aria-live="polite"></div>
     </div>
     <div class="m-chords m-more" id="m-chords"></div>
     <div class="m-track" id="m-vibes">${VIBES.map((v) => `<button class="m-vibe" data-vibe="${v.id}" aria-pressed="false"><i></i>${v.label}</button>`).join('')}</div>
@@ -236,6 +239,25 @@ export function mountMobile(root: HTMLElement): void {
     if (!current) return;
     current.keys = !keysOn();
     refresh();
+  });
+  // A word over the melody for a moment: what a tap just changed.
+  const toast = $<HTMLDivElement>('m-toast');
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashHint(text: string): void {
+    toast.textContent = text;
+    toast.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 1600);
+  }
+  // Chill (on the melody, always there): calmer chord changes, per take. Tap = calmer, then back.
+  const CHILL = ['as sung', 'chill: one a bar', 'extra chill: one every two bars'];
+  const chillOf = (r: { chill?: number } | null): number => Math.max(0, Math.min(2, r?.chill ?? 0));
+  $<HTMLButtonElement>('m-chill').addEventListener('click', () => {
+    if (!current) return;
+    current.chill = (chillOf(current) + 1) % 3;
+    refresh();
+    // Say what it is now, for a moment, where the hints go.
+    flashHint(CHILL[current.chill]);
   });
   // How much each player does, per take: 0 sparse · 1 normal (default) · 2 busy.
   const FEEL = ['Super chill', 'Normal', 'Busy'];
@@ -725,7 +747,9 @@ export function mountMobile(root: HTMLElement): void {
   function computeChords(s: Settings): Chord[] {
     const r = take();
     // Lo-fi keys drift with the singing; a Latin band changes chords on the grid.
-    return r ? takeChords(r, s, { chordsPerBar: 'auto', floaty: genreOf(current) === 'lofi' || genreOf(current) === 'dream', seed: 1 }) : [];
+    // Chill: fewer changes. As sung (as the melody asks, up to two a bar) → one a bar → one every two bars.
+    const rate = (['auto', 1, 0.5] as const)[chillOf(current)];
+    return r ? takeChords(r, s, { chordsPerBar: rate, floaty: genreOf(current) === 'lofi' || genreOf(current) === 'dream', seed: 1 }) : [];
   }
 
   /**
@@ -799,6 +823,11 @@ export function mountMobile(root: HTMLElement): void {
     $<HTMLElement>('m-spice').setAttribute('aria-label', `Chord spice: ${SPICE_LEVELS[level]}`);
     $<HTMLElement>('m-peppers').innerHTML = [1, 2, 3].map((k) => `<i class="${k <= level ? 'hot' : ''}"></i>`).join('');
     $<HTMLElement>('m-wand').classList.toggle('lit', !!current?.wand && level > 0);
+    const chill = chillOf(current);
+    const chillBtn = $<HTMLElement>('m-chill');
+    chillBtn.setAttribute('aria-label', `Chord changes: ${CHILL[chill]}`);
+    chillBtn.classList.toggle('lit', chill > 0);
+    $<HTMLElement>('m-chill-pips').innerHTML = [1, 2].map((k) => `<i class="${k <= chill ? 'hot' : ''}"></i>`).join('');
     chords = computeChords(s);
     shown =effectiveAnalysis(rec)?.notes ?? [];
     ghosts = heardOutside(rec.analysis.notes, shown, s.key ? scalePitchClasses(s.key.tonic, s.key.mode) : null);

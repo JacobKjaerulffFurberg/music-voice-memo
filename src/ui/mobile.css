@@ -1366,3 +1366,67 @@ body {
     animation: none;
   }
 }
+
+/* Chill: on the other corner of the melody from the wand. Fewer chord changes per tap. */
+.m-chill {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--note);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  z-index: 2;
+}
+.m-chill svg {
+  width: 22px;
+  height: 22px;
+}
+.m-chill .m-pips {
+  display: flex;
+  gap: 3px;
+}
+.m-chill .m-pips i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.m-chill .m-pips i.hot {
+  background: var(--note);
+}
+.m-chill.lit {
+  background: color-mix(in srgb, var(--note) 22%, var(--surface-2));
+}
+.m-chill:active {
+  transform: scale(0.94);
+}
+/* What a tap just changed, said quietly over the melody. */
+.m-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translate(-50%, 6px);
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  color: var(--fg);
+  font-family: var(--pixel);
+  font-size: 14px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    opacity 250ms ease,
+    transform 250ms ease;
+  z-index: 3;
+}
+.m-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}

@@ -50,6 +50,8 @@ export interface StoredRecording {
   chordEdits?: Record<string, { root: number; quality: Quality }>;
   /** How spicy the chords are: 0 plain … 3 neo-soul. */
   spice?: number;
+  /** Phone page: how calm the chord changes are. 0 as sung (default) · 1 one per bar · 2 one every two bars. */
+  chill?: number;
   /** Magic wand: seed for which colours and stand-in chords the spice picks. A new number = a new take on the chords. */
   wand?: number;
   /** How far the chords leave the key: 0 in key … 3 outside. */

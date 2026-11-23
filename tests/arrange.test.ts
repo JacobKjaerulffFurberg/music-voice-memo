@@ -103,6 +103,29 @@ describe('chords', () => {
   it('two chords per bar doubles the segments', () => {
     expect(suggestChords([n(60, 0)], { tonic: 0, mode: 'major' }, g, { chordsPerBar: 2 })).toHaveLength(8);
   });
+
+  it('extra chill: one chord every two bars, covering the take', () => {
+    const slow = suggestChords([n(60, 0), n(65, 2), n(67, 4), n(64, 6)], { tonic: 0, mode: 'major' }, g, { chordsPerBar: 0.5 });
+    expect(slow).toHaveLength(2); // 4 bars → 2 chords
+    expect(slow[0].start).toBeCloseTo(0.5);
+    expect(slow[0].duration).toBeCloseTo(4);
+    expect(slow[1].start + slow[1].duration).toBeCloseTo(8.5);
+  });
+
+  it('extra chill keeps the progression moving', () => {
+    // C – F – G – C, one bar each, spelled out in the melody.
+    const bars = [
+      [60, 64, 67, 64],
+      [65, 69, 72, 69],
+      [67, 71, 74, 71],
+      [72, 67, 64, 60],
+    ];
+    const mel = bars.flatMap((b, bi) => b.map((m, k) => n(m, bi * 4 + k)));
+    const slow = suggestChords(mel, { tonic: 0, mode: 'major' }, g, { chordsPerBar: 0.5 });
+    expect(slow).toHaveLength(2);
+    // Calmer, but still going somewhere: not the same chord twice in a row when the bars moved.
+    expect(`${slow[0].root}${slow[0].quality}`).not.toBe(`${slow[1].root}${slow[1].quality}`);
+  });
 });
 
 describe('floaty chords', () => {

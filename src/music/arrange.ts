@@ -271,8 +271,8 @@ export function voiceChord(root: number, quality: Quality, prev: number[] | null
 }
 
 export interface ChordOptions {
-  /** 'auto' splits a bar into two chords when the melody clearly changes harmony mid-bar. */
-  chordsPerBar: 1 | 2 | 'auto';
+  /** 'auto' splits a bar into two chords when the melody clearly changes harmony mid-bar; 0.5 = one chord every two bars. */
+  chordsPerBar: 0.5 | 1 | 2 | 'auto';
   /** 0–3: how readily chords from outside the key are used where the melody sings outside notes. */
   chroma: number;
 }
@@ -439,6 +439,29 @@ export function suggestChords(
     chords.push(chord);
     prev = chord;
   };
+
+  // Slow (one chord every two bars): the one-a-bar progression at half the pace. Of each pair of
+  // bars' chords, the one that fits both bars' melody best stays, but never the same as the chord
+  // before when the other one moves: calmer, and still going somewhere.
+  if (mode === 0.5) {
+    const perBar = suggestChords(notes, key, g, { ...options, chordsPerBar: 1 });
+    const fit = (c: Chord, w: Float64Array): number => chordTones(c.root, c.quality).reduce((sum, pc) => sum + w[pc], 0);
+    const same = (x: Chord, y: Chord | null): boolean => !!y && x.root === y.root && x.quality === y.quality;
+    let last: Chord | null = null;
+    for (let i = 0; i < perBar.length; i += 2) {
+      const first = perBar[i];
+      const second = perBar[i + 1];
+      const end = (second ?? first).start + (second ?? first).duration;
+      const { w } = melodyWeights(notes, first.start, end);
+      let pick = second && fit(second, w) > fit(first, w) ? second : first;
+      const other = pick === first ? second : first;
+      if (other && same(pick, last) && !same(other, last)) pick = other;
+      const chord: Chord = { ...pick, start: first.start, duration: end - first.start, voicing: voiceChord(pick.root, pick.quality, last?.voicing ?? null) };
+      chords.push(chord);
+      last = chord;
+    }
+    return chords;
+  }
 
   bars.forEach((b, bi) => {
     const end = Math.min(b + bar, g.durationSec);
