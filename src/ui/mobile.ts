@@ -10,7 +10,7 @@
 import { analyzeInWorker } from '../analysis/client';
 import { liveGuess, newLiveState } from '../analysis/live';
 import { hzToMidi, keyName, noteName, scalePitchClasses } from '../analysis/music';
-import { fitGridAtBpm, onsetsFromNotes } from '../analysis/tempo';
+import { fitGridAtBpm, onsetsFromNotes, tempoNearHint } from '../analysis/tempo';
 import type { Note } from '../analysis/types';
 import { micPermissionGranted, Recorder } from '../audio/recorder';
 import { effectiveAnalysis, effectiveSettings, newId, type Layer, type Settings, type StoredRecording } from '../model';
@@ -662,13 +662,14 @@ export function mountMobile(root: HTMLElement): void {
     const bpm = tappedBpm;
     tappedBpm = null;
     resetTap();
-    if (bpm) current.overrides.bpm = bpm;
     await saveRecording(current).catch(() => undefined);
     await analyze('normal');
     if (bpm && current?.analysis) {
-      const fb = fitGridAtBpm(onsetsFromNotes(current.analysis.notes), bpm);
-      if (fb !== null) {
-        current.overrides.firstBeatMs = Math.round(fb * 1000);
+      // The tap is a hint: the tempo is read from the singing, near what was tapped.
+      const t = tempoNearHint(onsetsFromNotes(current.analysis.notes), bpm);
+      current.overrides.bpm = t.bpm;
+      if (t.firstBeat !== null) {
+        current.overrides.firstBeatMs = Math.round(t.firstBeat * 1000);
         current.overrides.firstBeatAuto = true;
       }
       await saveRecording(current, false).catch(() => undefined);
@@ -677,7 +678,7 @@ export function mountMobile(root: HTMLElement): void {
   }
   // ---------- tap tempo + count-in ----------
   // Four taps on "tap tempo" set the beat; four clicks follow at that tempo, and recording starts on
-  // the next beat. The take is then built on that tempo (only its phase is fitted to the singing).
+  // the next beat. The tap is then a hint: the take's tempo is read from the singing near it.
   const tapBtn = $<HTMLButtonElement>('m-tap');
   const tapDots = [...$<HTMLElement>('m-tap-dots').querySelectorAll('i')];
   const tapLabel = $<HTMLElement>('m-tap-label');

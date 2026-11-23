@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fitGridAtBpm, onsetsFromNotes, tempoFromNotes } from '../src/analysis/tempo';
+import { fitGridAtBpm, onsetsFromNotes, tempoFromNotes, tempoNearHint } from '../src/analysis/tempo';
 import { evaluate, simTake } from './tempo-bench';
 
 describe('tempo on simulated sung takes', () => {
@@ -21,5 +21,20 @@ describe('tempo on simulated sung takes', () => {
       if (Math.abs(d - Math.round(d)) * P < 0.06) ok++;
     }
     expect(ok).toBeGreaterThan(85);
+  });
+
+  it('a tapped tempo guides the reading: off by up to 7 % (or tapped in half time), the singing still sets it', () => {
+    let ok = 0;
+    let n = 0;
+    for (let i = 1; i <= 100; i++) {
+      const t = simTake(i);
+      for (const tap of [t.bpm * 0.94, t.bpm * 1.07, t.bpm / 2]) {
+        n++;
+        const r = tempoNearHint(onsetsFromNotes(t.notes), tap);
+        const want = tap < t.bpm * 0.7 ? t.bpm / 2 : t.bpm;
+        if (Math.abs(r.bpm / want - 1) < 0.02) ok++;
+      }
+    }
+    expect(ok / n).toBeGreaterThan(0.85);
   });
 });

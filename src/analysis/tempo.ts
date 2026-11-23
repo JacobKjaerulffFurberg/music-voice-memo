@@ -197,6 +197,28 @@ export function fitGridAtBpm(onsets: Onset[], bpm: number, options: Partial<Temp
   return findDownbeat(onsets, P, phi, o.beatsPerBar);
 }
 
+/**
+ * The tempo of the singing, guided by a tapped tempo: only tempos within ±10 % of the tap are
+ * considered (so the tap settles double / half time and rules out odd guesses), and among those
+ * the one the notes fit best wins. Too few notes to tell: the tap as it is.
+ */
+export function tempoNearHint(onsets: Onset[], hintBpm: number, options: Partial<TempoOptions> = {}): { bpm: number; firstBeat: number | null } {
+  const o: TempoOptions = { ...DEFAULT_TEMPO_OPTIONS, ...options };
+  const sorted = [...onsets].sort((x, y) => x.time - y.time);
+  if (sorted.length < 4 || !(hintBpm > 0)) return { bpm: hintBpm, firstBeat: fitGridAtBpm(sorted, hintBpm, o) };
+  let best = hintBpm;
+  let bestScore = -Infinity;
+  for (let bpm = hintBpm * 0.9; bpm <= hintBpm * 1.1; bpm += 0.25) {
+    // A whisker of preference for the tap itself, so a flat fit doesn't wander off it.
+    const score = candidateScore(sorted, bpm, o).score * (1 - 0.15 * Math.abs(bpm / hintBpm - 1));
+    if (score > bestScore) {
+      bestScore = score;
+      best = bpm;
+    }
+  }
+  return { bpm: best, firstBeat: fitGridAtBpm(sorted, best, o) };
+}
+
 function prior(bpm: number, o: TempoOptions): number {
   return Math.exp(-0.5 * (Math.log2(bpm / o.priorCenterBpm) / o.priorOctaves) ** 2);
 }
