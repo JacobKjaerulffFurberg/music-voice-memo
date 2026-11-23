@@ -19,6 +19,16 @@ export const LITE = ((): boolean => {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
 })();
 
+/** Soft clipping for the old-radio voice. */
+const VOICE_GRIT = ((): Float32Array => {
+  const c = new Float32Array(1025);
+  for (let i = 0; i < c.length; i++) {
+    const x = (i / 512 - 1) * 3;
+    c[i] = Math.tanh(x) / Math.tanh(3);
+  }
+  return c;
+})();
+
 const mtof = (midi: number, cents: number): number => 440 * Math.pow(2, (midi - 69 + cents / 100) / 12);
 
 export interface PlayNote {
@@ -62,7 +72,7 @@ export interface PlayOptions {
    * a duller top end, and the band ducking a little under each kick.
    */
   dust?: number;
-  /** Voice effects turned up: 0 as set, 1 a bit of room and echo, 2 that and a narrow lo-fi voice. */
+  /** Voice effects turned up: 0 as set, 1 a warm room, 2 an old-radio voice (narrow, a little gritty) with a slap echo. */
   voiceFx?: number;
   /** How much room (reverb) is put on the recorded voice, 0–1. Default 0.07: barely there. */
   voiceRoom?: number;
@@ -552,7 +562,7 @@ export class Player {
   private voiceIn: { ctx: BaseAudioContext; node: AudioNode } | null = null;
   private voiceWet: GainNode | null = null;
   private voiceEcho: { send: GainNode; delay: DelayNode } | null = null;
-  private voiceTone: { low: BiquadFilterNode; high: BiquadFilterNode; gain: GainNode } | null = null;
+  private voiceTone: { low: BiquadFilterNode; high: BiquadFilterNode; grit: WaveShaperNode; gain: GainNode } | null = null;
 
   /**
    * A light polish on the recorded voice, barely there on purpose: rumble cut,
@@ -589,8 +599,9 @@ export class Player {
     const low = ctx.createBiquadFilter();
     low.type = 'lowpass';
     low.frequency.value = 20000;
-    input.connect(rumble).connect(box).connect(air).connect(high).connect(low).connect(level).connect(makeup).connect(this.out(ctx));
-    this.voiceTone = { low, high, gain: makeup };
+    const grit = ctx.createWaveShaper();
+    input.connect(rumble).connect(box).connect(air).connect(high).connect(low).connect(grit).connect(level).connect(makeup).connect(this.out(ctx));
+    this.voiceTone = { low, high, grit, gain: makeup };
     const room = LITE ? this.sharedRoom(ctx) : this.roomNode(ctx);
     if (!LITE) room.connect(this.out(ctx));
     const wet = ctx.createGain();
@@ -620,12 +631,14 @@ export class Player {
   private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
     this.voiceBus(ctx);
     const fx = Math.max(0, Math.min(2, Math.round(o.voiceFx ?? 0)));
-    this.voiceWet?.gain.setTargetAtTime(Math.max(o.voiceRoom ?? 0.07, [0, 0.15, 0.18][fx]), ctx.currentTime, 0.05);
+    this.voiceWet?.gain.setTargetAtTime(fx === 2 ? 0.04 : Math.max(o.voiceRoom ?? 0.07, fx === 1 ? 0.22 : 0), ctx.currentTime, 0.05);
     if (this.voiceTone) {
       const t = ctx.currentTime;
-      this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 320 : 20, t);
-      this.voiceTone.low.frequency.setValueAtTime(fx === 2 ? 3400 : 20000, t);
-      this.voiceTone.gain.gain.setValueAtTime(fx === 2 ? 1.5 : 1.2, t);
+      this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 500 : 20, t);
+      this.voiceTone.low.frequency.setValueAtTime(fx === 2 ? 2600 : 20000, t);
+      this.voiceTone.high.Q.value = this.voiceTone.low.Q.value = fx === 2 ? 1.1 : 0.707;
+      this.voiceTone.grit.curve = fx === 2 ? VOICE_GRIT : null;
+      this.voiceTone.gain.gain.setValueAtTime(fx === 2 ? 1.7 : 1.2, t);
     }
     if (this.voiceEcho) {
       // Three quarters of a (relaxed) beat: the repeats fall between the words, in time.
@@ -633,7 +646,7 @@ export class Player {
       while (beat < 0.5) beat *= 2;
       while (beat > 1) beat /= 2;
       this.voiceEcho.delay.delayTime.setValueAtTime(0.75 * beat, ctx.currentTime);
-      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, Math.max(o.voiceEcho ?? 0, [0, 0.1, 0.14][fx]))), ctx.currentTime, 0.05);
+      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, fx === 2 ? 0.2 : fx === 1 ? 0 : (o.voiceEcho ?? 0))), ctx.currentTime, 0.05);
     }
   }
 
