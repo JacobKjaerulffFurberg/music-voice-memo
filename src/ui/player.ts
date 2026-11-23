@@ -6,8 +6,9 @@ import type { Chord, DrumHit } from '../music/arrange';
 import type { CompNote } from '../music/groove';
 
 /**
- * Phones get a lighter sound engine: every room shares one shorter, mono-in reverb, the drive isn't oversampled and piano notes skip their own filter. Close to the same
- * sound, a fraction of the work, so a phone keeps up instead of crackling.
+ * Phones get a lighter sound engine: every room shares one mono-in reverb instead of each part
+ * having its own. That is the big saving; the piano's touch, the drive and the room's length
+ * stay as on a laptop, so it sounds the same.
  * `?lite=1` / `?lite=0` in the address forces it on or off.
  */
 export const LITE = ((): boolean => {
@@ -61,6 +62,8 @@ export interface PlayOptions {
    * a duller top end, and the band ducking a little under each kick.
    */
   dust?: number;
+  /** Voice effects turned up: 0 as set, 1 a big room and echo, 2 that and a narrow lo-fi voice. */
+  voiceFx?: number;
   /** How much room (reverb) is put on the recorded voice, 0–1. Default 0.07: barely there. */
   voiceRoom?: number;
   /** Rain on the window: a looped recording (public/sounds/rain.*) that keeps going across loop passes. */
@@ -395,8 +398,7 @@ export class Player {
     const touch = ctx.createBiquadFilter();
     touch.type = 'lowpass';
     touch.frequency.value = 900 + 5200 * vel;
-    if (LITE) src.connect(env).connect(dest);
-    else src.connect(touch).connect(env).connect(dest);
+    src.connect(touch).connect(env).connect(dest);
     src.start(start);
     src.stop(hold + damp * 6 + 0.1);
     this.nodes.push(src);
@@ -550,6 +552,7 @@ export class Player {
   private voiceIn: { ctx: BaseAudioContext; node: AudioNode } | null = null;
   private voiceWet: GainNode | null = null;
   private voiceEcho: { send: GainNode; delay: DelayNode } | null = null;
+  private voiceTone: { low: BiquadFilterNode; high: BiquadFilterNode; gain: GainNode } | null = null;
 
   /**
    * A light polish on the recorded voice, barely there on purpose: rumble cut,
@@ -579,7 +582,15 @@ export class Player {
     level.release.value = 0.22;
     const makeup = ctx.createGain();
     makeup.gain.value = 1.2;
-    input.connect(rumble).connect(box).connect(air).connect(level).connect(makeup).connect(this.out(ctx));
+    // The lo-fi voice: open unless voiceFx asks for it narrow.
+    const high = ctx.createBiquadFilter();
+    high.type = 'highpass';
+    high.frequency.value = 20;
+    const low = ctx.createBiquadFilter();
+    low.type = 'lowpass';
+    low.frequency.value = 20000;
+    input.connect(rumble).connect(box).connect(air).connect(high).connect(low).connect(level).connect(makeup).connect(this.out(ctx));
+    this.voiceTone = { low, high, gain: makeup };
     const room = LITE ? this.sharedRoom(ctx) : this.roomNode(ctx);
     if (!LITE) room.connect(this.out(ctx));
     const wet = ctx.createGain();
@@ -608,14 +619,21 @@ export class Player {
   /** Set how much room and echo the voice gets for this playback. */
   private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
     this.voiceBus(ctx);
-    this.voiceWet?.gain.setTargetAtTime(o.voiceRoom ?? 0.07, ctx.currentTime, 0.05);
+    const fx = Math.max(0, Math.min(2, Math.round(o.voiceFx ?? 0)));
+    this.voiceWet?.gain.setTargetAtTime(Math.max(o.voiceRoom ?? 0.07, [0, 0.4, 0.5][fx]), ctx.currentTime, 0.05);
+    if (this.voiceTone) {
+      const t = ctx.currentTime;
+      this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 320 : 20, t);
+      this.voiceTone.low.frequency.setValueAtTime(fx === 2 ? 3400 : 20000, t);
+      this.voiceTone.gain.gain.setValueAtTime(fx === 2 ? 1.5 : 1.2, t);
+    }
     if (this.voiceEcho) {
       // Three quarters of a (relaxed) beat: the repeats fall between the words, in time.
       let beat = 60 / Math.max(30, o.bpm);
       while (beat < 0.5) beat *= 2;
       while (beat > 1) beat /= 2;
       this.voiceEcho.delay.delayTime.setValueAtTime(0.75 * beat, ctx.currentTime);
-      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, o.voiceEcho ?? 0)), ctx.currentTime, 0.05);
+      this.voiceEcho.send.gain.setTargetAtTime(Math.max(0, Math.min(1, Math.max(o.voiceEcho ?? 0, [0, 0.32, 0.42][fx]))), ctx.currentTime, 0.05);
     }
   }
 
@@ -635,7 +653,7 @@ export class Player {
     const tail = 3.5;
     const rate = this.ctx?.sampleRate === 48000 ? 48000 : 44100;
     const off = new OfflineAudioContext(2, Math.ceil((lead + len * times + tail) * rate), rate);
-    const keep = { master: this.master, fx: this.fx, shared: this.shared, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
+    const keep = { master: this.master, fx: this.fx, shared: this.shared, voiceIn: this.voiceIn, voiceWet: this.voiceWet, voiceEcho: this.voiceEcho, voiceTone: this.voiceTone, samples: this.samples, sampleRate: this.sampleRate, opts: this.opts, dust: this.dust, duration: this.duration };
     try {
       this.rendering = off;
       this.master = null;
@@ -818,7 +836,7 @@ export class Player {
   private warmShaper(ctx: BaseAudioContext): WaveShaperNode {
     const drive = ctx.createWaveShaper();
     drive.curve = this.warmCurve();
-    drive.oversample = LITE ? 'none' : '2x';
+    drive.oversample = '2x';
     return drive;
   }
 
@@ -1286,8 +1304,7 @@ export class Player {
   /** Stereo decaying-noise impulse: a soft ~2 s room. */
   private roomImpulse(ctx: BaseAudioContext): AudioBuffer {
     if (this.room && this.room.sampleRate === ctx.sampleRate) return this.room;
-    // Phones: 1.4 s. The tail past that is under -25 dB and a long reverb is the costliest thing here.
-    const len = Math.round((LITE ? 1.4 : 2.2) * ctx.sampleRate);
+    const len = Math.round(2.2 * ctx.sampleRate);
     const buf = ctx.createBuffer(2, len, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
       const d = buf.getChannelData(ch);

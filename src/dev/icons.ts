@@ -1,47 +1,57 @@
 /**
- * Dev tool: paints the app icons and splash screens from the rainy-window scene and sends them to
- * scripts/icons-server.mjs, which writes them into the project. Not part of the app.
+ * Dev tool: paints the app icons and splash screens (the record button, like the home screen) and
+ * sends them to scripts/icons-server.mjs, which writes them into the project. Not part of the app.
  * Run in the console of the dev page:  (await import('/src/dev/icons.ts')).makeIcons()
  */
-import { RainScene } from '../ui/rain-scene';
-
 const SERVER = '/__icons'; // the dev server passes this on to scripts/icons-server.mjs
-const BG = '#121117';
+const BG = '#17130e';
+const AMBER = '#e0a45a';
 
-/** The scene painted portrait (3:4) at width `w`, a moment into the rain. */
-function scene(w: number): HTMLCanvasElement {
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = Math.round((w * 4) / 3);
-  new RainScene(c.width, c.height).draw(c.getContext('2d') as CanvasRenderingContext2D, 2.4);
-  return c;
+/** The record button, as on the home screen: a soft amber halo, a thin ring, the amber dot. */
+function recButton(c: CanvasRenderingContext2D, x: number, y: number, r: number): void {
+  c.fillStyle = 'rgba(224, 164, 90, 0.16)';
+  c.beginPath();
+  c.arc(x, y, r, 0, Math.PI * 2);
+  c.fill();
+  c.lineWidth = Math.max(1, r * 0.03);
+  c.strokeStyle = 'rgba(224, 164, 90, 0.6)';
+  c.beginPath();
+  c.arc(x, y, r - c.lineWidth / 2, 0, Math.PI * 2);
+  c.stroke();
+  c.fillStyle = AMBER;
+  c.beginPath();
+  c.arc(x, y, r * 0.64, 0, Math.PI * 2);
+  c.fill();
+}
+
+/** A fine film grain over the whole picture, like the app. */
+function grain(c: CanvasRenderingContext2D, w: number, h: number): void {
+  const img = c.getImageData(0, 0, w, h);
+  const d = img.data;
+  let seed = 7;
+  for (let i = 0; i < d.length; i += 4) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    const n = ((seed >>> 16) / 65536 - 0.5) * 22;
+    d[i] += n;
+    d[i + 1] += n;
+    d[i + 2] += n;
+  }
+  c.putImageData(img, 0, 0);
 }
 
 type Crop = 'icon' | 'tight' | 'splash';
 
-/** A w×h PNG. icon: the lower window, the tea, the sill. tight: closer on the cup (round/adaptive masks). splash: the whole scene, small, on the dark. */
+/** A w×h PNG. icon: the button filling the square. tight: smaller, inside the adaptive-icon safe zone. splash: small on the brown. */
 function render(w: number, h: number, crop: Crop): Promise<Blob> {
   const out = document.createElement('canvas');
   out.width = w;
   out.height = h;
   const c = out.getContext('2d') as CanvasRenderingContext2D;
-  c.imageSmoothingQuality = 'high';
   c.fillStyle = BG;
   c.fillRect(0, 0, w, h);
-  if (crop === 'splash') {
-    const sw = Math.round(Math.min(w, h) * 0.42);
-    const src = scene(sw * 2);
-    const sh = (sw * 4) / 3;
-    c.drawImage(src, (w - sw) / 2, (h - sh) / 2, sw, sh);
-  } else {
-    const side = Math.max(w, h);
-    const src = scene(Math.max(512, side * 2));
-    const W = src.width;
-    const H = src.height;
-    // icon: a square from the bottom of the picture; tight: a smaller square around the cup.
-    const [sx, sy, ss] = crop === 'icon' ? [0, H - W, W] : [W * 0.2, H * 0.47, W * 0.66];
-    c.drawImage(src, sx, sy, ss, ss, 0, 0, w, h);
-  }
+  const side = Math.min(w, h);
+  recButton(c, w / 2, h / 2, side * { icon: 0.36, tight: 0.26, splash: 0.16 }[crop]);
+  grain(c, w, h);
   return new Promise((resolve, reject) => out.toBlob((b) => (b ? resolve(b) : reject(new Error('no PNG'))), 'image/png'));
 }
 
@@ -58,8 +68,8 @@ export async function makeIcons(): Promise<string> {
   const res = 'android/app/src/main/res';
   for (const [dpi, k] of Object.entries({ mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 })) {
     await send(`${res}/mipmap-${dpi}/ic_launcher.png`, 48 * k, 48 * k, 'icon');
-    await send(`${res}/mipmap-${dpi}/ic_launcher_round.png`, 48 * k, 48 * k, 'tight');
-    // Adaptive icons show only the middle two thirds: the tight crop keeps the cup in it.
+    await send(`${res}/mipmap-${dpi}/ic_launcher_round.png`, 48 * k, 48 * k, 'icon');
+    // Adaptive icons show only the middle two thirds: the tight size keeps the whole button in it.
     await send(`${res}/mipmap-${dpi}/ic_launcher_foreground.png`, 108 * k, 108 * k, 'tight');
   }
   await send('ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png', 1024, 1024, 'icon');

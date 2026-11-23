@@ -52,6 +52,8 @@ export interface StoredRecording {
   spice?: number;
   /** Phone page: how calm the chord changes are. 0 as sung (default) · 1 one per bar · 2 one every two bars. */
   chill?: number;
+  /** Voice effects on the phone page: 0 as the vibe has it, 1 wet, 2 lo-fi. */
+  voiceFx?: number;
   /** Magic wand: seed for which colours and stand-in chords the spice picks. A new number = a new take on the chords. */
   wand?: number;
   /** How far the chords leave the key: 0 in key … 3 outside. */

@@ -374,7 +374,7 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
     const grid = { bpm: s.bpm, firstBeatSec: s.firstBeatMs / 1000, beatsPerBar: 4, durationSec: current.samples.length / current.sampleRate };
     const rate = chordsRate.value === '1' ? 1 : chordsRate.value === '2' ? 2 : 'auto';
     // Played chords, or chords suggested for the melody, with any picks / spice from the phone page.
-    const chords = takeChords(current, s, { chordsPerBar: rate, floaty: floatyChk.checked });
+    const chords = takeChords(current, s, { chordsPerBar: rate, floaty: floatyChk.checked, seed: 1 });
     return { drums: drumHits(drumPattern(), grid), chords };
   }
 

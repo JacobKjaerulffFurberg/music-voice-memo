@@ -25,7 +25,6 @@ import { deleteRecording, listRecordings, loadRecording, saveRecording } from '.
 import { Player, type PlayOptions } from './player';
 import { tuneVoice } from '../music/tune';
 import { encodeMp3, fileName, handOver, isNativeApp } from '../export/mp3';
-import { playRainScene } from './rain-scene';
 import { buildLabel, checkForUpdate, installApk, installWebUpdate, markAppReady, type UpdateState } from '../app-update';
 
 /** Colours of the sung layers' lines and chips, in order. */
@@ -50,6 +49,7 @@ const ICON = {
   wand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>',
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/><path d="M20 4l.5 1.5L22 6l-1.5.5L20 8l-.5-1.5L18 6l1.5-.5z" fill="currentColor"/></svg>',
   cup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h13v4a6 6 0 0 1-6 6H10a6 6 0 0 1-6-6z"/><path d="M17 11h1.5a2.5 2.5 0 0 1 0 5H16.5"/><path d="M8 3c-.6 1 .6 2 0 3M12 3c-.6 1 .6 2 0 3"/></svg>',
 };
 
@@ -62,7 +62,7 @@ const TEMPLATE = `
   </header>
 
   <section class="m-stage" id="m-stage">
-    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas><div class="m-room" aria-hidden="true"><canvas id="m-room"></canvas><b>lo-fi <span>your life</span></b></div></div>
+    <div class="m-stage-top"><canvas class="m-roll" id="m-roll"></canvas><div class="m-room" aria-hidden="true"><b>lo-fi <span>your life</span></b></div></div>
     <button class="m-rec" id="m-rec" aria-label="Record"><span></span></button>
     <div class="m-stage-bot">
       <div class="m-live" id="m-live"></div>
@@ -83,6 +83,7 @@ const TEMPLATE = `
       <canvas class="m-melody" id="m-melody"></canvas>
       <div class="m-lays" id="m-lays"></div>
       <button class="m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
+      <button class="m-vfx" id="m-vfx" aria-label="Voice effects">${ICON.sparkle}<span class="m-pips" id="m-vfx-pips"></span></button>
       <button class="m-chill" id="m-chill" aria-label="Chill the chords">${ICON.cup}<span class="m-pips" id="m-chill-pips"></span></button>
       <div class="m-toast" id="m-toast" aria-live="polite"></div>
     </div>
@@ -258,6 +259,15 @@ export function mountMobile(root: HTMLElement): void {
     refresh();
     // Say what it is now, for a moment, where the hints go.
     flashHint(CHILL[current.chill]);
+  });
+  // Voice effects (on the melody, always there): tap to crank them, per take.
+  const VFX = ['voice: natural', 'voice: big room + echo', 'voice: lo-fi'];
+  const vfxOf = (r: { voiceFx?: number } | null): number => Math.max(0, Math.min(2, r?.voiceFx ?? 0));
+  $<HTMLButtonElement>('m-vfx').addEventListener('click', () => {
+    if (!current) return;
+    current.voiceFx = (vfxOf(current) + 1) % 3;
+    refresh();
+    flashHint(VFX[current.voiceFx]);
   });
   // How much each player does, per take: 0 sparse · 1 normal (default) · 2 busy.
   const FEEL = ['Super chill', 'Normal', 'Busy'];
@@ -531,17 +541,11 @@ export function mountMobile(root: HTMLElement): void {
     requestAnimationFrame(drawRoll);
   }
 
-  const room = playRainScene($<HTMLCanvasElement>('m-room'));
-  document.addEventListener('visibilitychange', () => (document.hidden || view !== 'idle' ? room.stop() : room.start()));
   stage.dataset.view = view;
-  if (view === 'idle') room.start();
   function setView(v: View): void {
     view = v;
     stage.hidden = v === 'result';
     stage.dataset.view = v;
-    // The rainy window only plays while it can be seen.
-    if (v === 'idle' && !document.hidden) room.start();
-    else room.stop();
     result.hidden = v !== 'result';
     recBtn.classList.toggle('on', v === 'recording');
     recBtn.hidden = v === 'analyzing';
@@ -640,9 +644,10 @@ export function mountMobile(root: HTMLElement): void {
     await analyze('normal');
   }
   recBtn.addEventListener('click', () => void toggleRecord());
-  $<HTMLButtonElement>('m-new').addEventListener('click', () => {
+  $<HTMLButtonElement>('m-new').addEventListener('click', async () => {
+    if (layering) await finishLayer(false);
+    stopPlayback();
     setView('idle');
-    void toggleRecord();
   });
 
   async function analyze(quality: 'normal' | 'high'): Promise<void> {
@@ -844,6 +849,11 @@ export function mountMobile(root: HTMLElement): void {
     $<HTMLElement>('m-spice').setAttribute('aria-label', `Chord spice: ${SPICE_LEVELS[level]}`);
     $<HTMLElement>('m-peppers').innerHTML = [1, 2, 3].map((k) => `<i class="${k <= level ? 'hot' : ''}"></i>`).join('');
     $<HTMLElement>('m-wand').classList.toggle('lit', !!current?.wand && level > 0);
+    const vfx = vfxOf(current);
+    const vfxBtn = $<HTMLElement>('m-vfx');
+    vfxBtn.setAttribute('aria-label', `Voice effects: ${VFX[vfx]}`);
+    vfxBtn.classList.toggle('lit', vfx > 0);
+    $<HTMLElement>('m-vfx-pips').innerHTML = [1, 2].map((k) => `<i class="${k <= vfx ? 'hot' : ''}"></i>`).join('');
     const chill = chillOf(current);
     const chillBtn = $<HTMLElement>('m-chill');
     chillBtn.setAttribute('aria-label', `Chord changes: ${CHILL[chill]}`);
@@ -1580,6 +1590,7 @@ export function mountMobile(root: HTMLElement): void {
       dust: dustOf(current),
       voiceRoom: vibeOf(current)?.room,
       voiceEcho: vibeOf(current)?.echo,
+      voiceFx: vfxOf(current),
       backing: vibeOf(current)?.backing,
       drumDark: vibeOf(current)?.drumDark,
       backingTuningCents: on(toggles.voice) ? s.tuningCents : 0,

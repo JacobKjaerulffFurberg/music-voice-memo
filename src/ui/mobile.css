@@ -1,19 +1,19 @@
 /* Minimal phone UI: one big button, then the melody, the chords, play. */
 
-/* Always dark. The look on top of these colours ("RAINY DAY") is near the end of this file. */
+/* Always dark; the plain look is warm brown. The look on top of these colours ("WORN VINYL") is near the end of this file. */
 :root {
-  --bg: #15151b;
-  --surface: #1e1e26;
-  --surface-2: #2d2d38;
-  --sheet: #1e1e26;
+  --bg: #17130e;
+  --surface: #221c15;
+  --surface-2: #342b1f;
+  --sheet: #221c15;
   --hair: transparent;
-  --fg: #f0eee8;
-  --muted: #8e8e9b;
+  --fg: #f3ecdf;
+  --muted: #9c8f7c;
   --faint: rgba(255, 255, 255, 0.05);
-  --accent: #e8573d;
-  --keys: #a79bd6;
-  --note: #dcc8a2;
-  --line: #f1eee6;
+  --accent: #e0a45a;
+  --keys: #d9b48a;
+  --note: #b9d3a0;
+  --line: #f3ecdf;
   color-scheme: dark;
 }
 
@@ -242,8 +242,8 @@ button {
 }
 .m-rec {
   position: relative;
-  width: 132px;
-  height: 132px;
+  width: min(200px, 52vw);
+  height: min(200px, 52vw);
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -267,8 +267,8 @@ button {
   border: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .m-rec span {
-  width: 84px;
-  height: 84px;
+  width: 64%;
+  height: 64%;
   border-radius: 50%;
   background: var(--accent);
   transition:
@@ -277,9 +277,9 @@ button {
     height 180ms ease;
 }
 .m-rec.on span {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
+  width: 34%;
+  height: 34%;
+  border-radius: 14px;
 }
 .m-rec:active span {
   transform: scale(0.96);
@@ -958,7 +958,7 @@ button {
 .m-lays {
   position: absolute;
   left: 10px;
-  bottom: 10px;
+  top: 10px;
   display: flex;
   gap: 8px;
   align-items: center;
@@ -1128,27 +1128,38 @@ button {
 }
 
 /* =====================================================================================
-   RAINY DAY: the "lo-fi your life" look. The style guide, in one place:
+   WORN VINYL: the "lo-fi your life" look. The style guide, in one place:
 
-   Mood     A grey, rainy afternoon from the warm side of the window: a cup of tea, a lamp on,
-            nowhere to be. Calm and soft; nothing shouts, nothing hurries.
+   Mood     A voice memo on a brown evening: minimal, vintage, a bit dusty. Calm and soft;
+            nothing shouts, nothing hurries, nothing moves for show.
    Type     --serif (Fraunces): the brand and anything that talks to you: titles, hints, vibe
                     words, take names, "ready". Italic for the gentle bits ("your life").
             system-ui: numbers, chord names, small control labels.
-   Colour   The vibe's colours stay in charge. On top: warm lamp light from above and a fine film
-            grain. The scene paints with rain-greys and blues against tea-amber and cream.
+   Colour   The vibe's colours stay in charge. On top: warm light from above and a fine dust
+            grain.
    Depth    Soft, low shadows (--soft). Rounded corners. No hard edges, no tilts, no pixels.
-   Motion   Slow and small: fades, gentle rises. Only the rain, the running drops and the steam loop.
+   Motion   Slow and small: fades, gentle rises. Nothing loops but the record button's slow breath while it waits.
    ===================================================================================== */
 :root {
   --serif: 'Fraunces', Georgia, 'Times New Roman', serif;
   --soft: 0 6px 18px rgba(0, 0, 0, 0.32);
   --soft-sm: 0 3px 10px rgba(0, 0, 0, 0.28);
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 0.94 0 0 0 0 0.86 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 0.94 0 0 0 0 0.86 0 0 0 0.11 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 body {
-  background-image: var(--grain), radial-gradient(120% 55% at 50% 0%, rgba(255, 186, 120, 0.07), transparent 70%);
+  background-image:
+    radial-gradient(110% 60% at 50% 0%, rgba(222, 168, 84, 0.12), transparent 72%),
+    radial-gradient(90% 50% at 85% 100%, rgba(190, 132, 58, 0.07), transparent 70%);
   background-attachment: fixed;
+}
+/* Grain over everything, buttons and sheets too: an old print, not a screen. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  background: var(--grain);
 }
 
 /* The take's name. */
@@ -1170,23 +1181,16 @@ body {
   font-weight: 400;
 }
 
-/* Home: the rainy window above the button, and its name. Only while waiting to record. */
+/* Home: just the name, up between the two corner icons. Only while waiting to record. */
 .m-room {
   position: absolute;
-  inset: 0 0 4px;
+  inset: -40px 0 auto;
+  height: 40px;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  justify-content: center;
   pointer-events: none;
   animation: m-room-in 900ms ease both;
-}
-.m-room canvas {
-  height: min(100% - 38px, 300px);
-  aspect-ratio: 3 / 4;
-  border-radius: 18px;
-  box-shadow: var(--soft);
 }
 .m-room b {
   font-family: var(--serif);
@@ -1216,6 +1220,15 @@ body {
 }
 .m-stage[data-view='recording'] .m-rec::before {
   opacity: 0.24;
+}
+.m-stage[data-view='idle'] .m-rec::before {
+  animation: m-wait 4.5s ease-in-out infinite;
+}
+@keyframes m-wait {
+  50% {
+    transform: scale(1.07);
+    opacity: 0.24;
+  }
 }
 
 /* Words that talk: "Sing", the loading steps, errors. */
@@ -1289,7 +1302,7 @@ body {
   }
 }
 
-/* ---------- Intro: rain on the glass, tea on the sill ---------- */
+/* ---------- Intro: the record button, and the name ---------- */
 .intro {
   position: fixed;
   inset: 0;
@@ -1303,7 +1316,7 @@ body {
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
-  background: var(--grain), radial-gradient(90% 60% at 50% 40%, #27262f, #121117 75%);
+  background: radial-gradient(90% 60% at 50% 40%, #2a2118, #120e0a 75%);
   animation: intro-in 900ms ease both;
   transition: opacity 700ms ease;
 }
@@ -1316,13 +1329,21 @@ body {
     opacity: 0;
   }
 }
-.intro-scene {
-  width: min(70vw, 320px, (100vh - 220px) * 0.75);
-  aspect-ratio: 3 / 4;
-  border-radius: 22px;
-  box-shadow:
-    0 18px 50px rgba(0, 0, 0, 0.55),
-    0 0 90px rgba(255, 176, 96, 0.1);
+.intro-rec {
+  width: min(40vw, 170px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 2px solid rgba(224, 164, 90, 0.6);
+  background: rgba(224, 164, 90, 0.16);
+}
+.intro-rec::after {
+  content: '';
+  width: 64%;
+  height: 64%;
+  border-radius: 50%;
+  background: #e0a45a;
 }
 .intro-title {
   margin: 0;
@@ -1348,13 +1369,15 @@ body {
   .intro,
   .intro-title,
   .intro-tap,
-  .m-room {
+  .m-room,
+  .m-stage .m-rec::before {
     animation: none;
   }
 }
 
 /* Chill: on the other corner of the melody from the wand. Fewer chord changes per tap. */
-.m-chill {
+.m-chill,
+.m-vfx {
   position: absolute;
   left: 10px;
   bottom: 10px;
@@ -1369,7 +1392,35 @@ body {
   gap: 2px;
   z-index: 2;
 }
-.m-chill svg {
+/* Voice effects: the melody's top-right corner. */
+.m-vfx {
+  left: auto;
+  bottom: auto;
+  right: 10px;
+  top: 10px;
+  color: var(--accent);
+}
+.m-vfx .m-pips {
+  display: flex;
+  gap: 3px;
+}
+.m-vfx .m-pips i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.m-vfx .m-pips i.hot {
+  background: var(--accent);
+}
+.m-vfx.lit {
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-2));
+}
+.m-vfx:active {
+  transform: scale(0.94);
+}
+.m-chill svg,
+.m-vfx svg {
   width: 22px;
   height: 22px;
 }
