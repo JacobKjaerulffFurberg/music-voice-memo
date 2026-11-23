@@ -9,5 +9,12 @@
   "ios": {
     "contentInset": "never",
     "backgroundColor": "#141217"
+  },
+  "plugins": {
+    "CapacitorUpdater": {
+      "autoUpdate": false,
+      "appReadyTimeout": 15000,
+      "resetWhenUpdate": true
+    }
   }
 }

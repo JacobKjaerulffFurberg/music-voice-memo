@@ -26,7 +26,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run build
+      # The site, plus the phone app's update (dist/app/). The stamp is the commit time, so the
+      # Android workflow stamps the same commit's APK identically.
+      - name: Build
+        run: |
+          export BUILD_ID=$(git log -1 --format=%ct)000
+          npm run app:web
+          node scripts/app-update.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

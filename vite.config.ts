@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 export default defineConfig({
   // Relative asset paths: works at a domain root or in a sub-folder (GitHub Pages: /music-voice-memo/).
   base: './',
+  // The build's version stamp: the deploy sets BUILD_ID so the app and its update file agree.
+  define: { __BUILD__: JSON.stringify(process.env.BUILD_ID ?? String(Date.now())) },
   build: {
     target: 'es2022',
     rollupOptions: {

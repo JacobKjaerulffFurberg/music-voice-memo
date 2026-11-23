@@ -1,11 +1,15 @@
-# Build the Android app (a debug APK you can install straight onto a phone) on every push to main.
-# Download it from the run's "Artifacts" section, open it on the phone, allow installing from that source.
+# Build the Android app on every push to main and publish it at one fixed link:
+#   https://github.com/JacobKjaerulffFurberg/music-voice-memo/releases/download/android-latest/lofi-your-life.apk
+# Open that on the phone to install (or update: every build is signed with the same key).
 name: Android app
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write # to update the android-latest release
 
 jobs:
   apk:
@@ -21,7 +25,10 @@ jobs:
           distribution: temurin
           java-version: 21
       - run: npm ci
-      - run: npm run app:web
+      - name: Build the web files
+        run: |
+          export BUILD_ID=$(git log -1 --format=%ct)000
+          npm run app:web
       - run: npx cap sync android
       - name: Build APK
         working-directory: android
@@ -30,5 +37,13 @@ jobs:
           ./gradlew assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: lofi-your-life-debug-apk
+          name: lofi-your-life-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish as the newest APK
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk lofi-your-life.apk
+          gh release view android-latest >/dev/null 2>&1 || gh release create android-latest --prerelease --target "$GITHUB_SHA" --title "Lo-fi Your Life: newest Android build" --notes "Open lofi-your-life.apk on an Android phone to install or update. Rebuilt on every push."
+          gh release upload android-latest lofi-your-life.apk --clobber

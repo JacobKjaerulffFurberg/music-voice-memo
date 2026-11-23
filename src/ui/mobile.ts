@@ -25,6 +25,7 @@ import { deleteRecording, listRecordings, loadRecording, saveRecording } from '.
 import { Player, type PlayOptions } from './player';
 import { tuneVoice } from '../music/tune';
 import { encodeMp3, fileName, handOver, isNativeApp } from '../export/mp3';
+import { buildLabel, checkForUpdate, installApk, installWebUpdate, markAppReady, type UpdateState } from '../app-update';
 
 /** Colours of the sung layers' lines and chips, in order. */
 const LAYER_COLOURS = ['--accent', '--keys', '--note'];
@@ -104,6 +105,10 @@ const TEMPLATE = `
       <button class="m-toggle" id="t-essentia" aria-pressed="true" aria-label="Essentia: extra key and tempo reading from the raw audio">Essentia</button>
       <button class="m-toggle" id="m-relisten" aria-label="Listen to this take again with the current settings">Re-listen</button>
     </div>
+    <div class="m-track m-more m-upd">
+      <span class="m-ver" id="m-ver"></span>
+      <button class="m-toggle" id="m-update" hidden>Check for update</button>
+    </div>
     <label class="m-track m-more m-dust"><span>Dust</span><input type="range" id="m-dust" min="0" max="100" step="1" aria-label="Dust"></label>
     <div class="m-track m-more" id="m-layers" hidden></div>
     <div class="m-controls">
@@ -119,6 +124,7 @@ const TEMPLATE = `
   <div class="m-sheet" id="m-picker" hidden>
     <div class="m-sheet-panel"><div class="m-sheet-grip"></div><div id="m-picker-body"></div></div>
   </div>
+  <button class="m-upd-pill" id="m-upd-pill" hidden>New version · update</button>
   <div class="m-busy" id="m-busy" hidden>
     <div class="m-load" id="m-busy-load"></div>
     <p class="m-hint" id="m-busy-word"></p>
@@ -333,6 +339,58 @@ export function mountMobile(root: HTMLElement): void {
     stopPlayback();
     void analyze(current.analysis?.quality === 'high' ? 'high' : 'normal');
   });
+
+  // Updates (in More, and a sticker on launch when there is one): the app fetches the newest
+  // version itself. On the website the newest always loads, so there it only says which build this is.
+  const verEl = $<HTMLSpanElement>('m-ver');
+  const updBtn = $<HTMLButtonElement>('m-update');
+  const updPill = $<HTMLButtonElement>('m-upd-pill');
+  verEl.textContent = `Version ${buildLabel()}`;
+  let upd: UpdateState = { kind: 'current' };
+  const showUpdate = (u: UpdateState): void => {
+    upd = u;
+    const news = u.kind === 'web' || u.kind === 'apk';
+    updBtn.setAttribute('aria-pressed', String(news));
+    updBtn.textContent = u.kind === 'web' ? 'Update now' : u.kind === 'apk' ? 'Get the new app' : u.kind === 'offline' ? 'Offline · retry' : 'Up to date ✓';
+    updPill.hidden = !news;
+  };
+  async function runUpdate(): Promise<void> {
+    if (upd.kind === 'apk') return installApk(upd.url);
+    let u: UpdateState = upd;
+    if (u.kind !== 'web') {
+      // Not known to be newer yet: ask first. A new app shell then waits for one more tap.
+      updBtn.textContent = 'Checking…';
+      u = await checkForUpdate();
+      showUpdate(u);
+      if (u.kind !== 'web') return;
+    }
+    stopPlayback();
+    updPill.hidden = true;
+    busy.hidden = false;
+    busyActs.hidden = true;
+    busyWord.classList.remove('ready');
+    busyLoad.innerHTML = LOAD_TUNE.map((y) => `<i style="--y:${y}px"></i>`).join('');
+    const dots = [...busyLoad.querySelectorAll<HTMLElement>('i')];
+    busyWord.textContent = 'fetching the new version';
+    try {
+      await installWebUpdate(u, (p) => dots.forEach((d, k) => d.classList.toggle('on', k < Math.round(p * dots.length))));
+      busyWord.textContent = 'restarting'; // the app reloads into the new build
+    } catch (e) {
+      busyWord.textContent = `couldn't update: ${e instanceof Error ? e.message : String(e)}`;
+      busyShare.hidden = true;
+      busyActs.hidden = false;
+    }
+  }
+  if (isNativeApp()) {
+    updBtn.hidden = false;
+    markAppReady();
+    updBtn.addEventListener('click', () => void runUpdate());
+    updPill.addEventListener('click', () => void runUpdate());
+    // A quiet look on launch; the sticker only shows when there is something newer.
+    void checkForUpdate().then((u) => {
+      if (u.kind !== 'offline') showUpdate(u);
+    });
+  }
 
   // "More": key, tempo, the chord chips and the part toggles stay hidden until asked for.
   const page = $<HTMLElement>('m');
@@ -1528,6 +1586,7 @@ export function mountMobile(root: HTMLElement): void {
         busyWord.classList.add('ready');
         busyShare.textContent = isNativeApp() || typeof navigator.canShare === 'function' ? 'Share' : 'Save';
         busyActs.hidden = false;
+        busyShare.hidden = false;
         busyShare.onclick = () => {
           handOver(blob, name)
             .then((how) => {

@@ -16,7 +16,22 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    // Every APK is signed with the same key, so a new one installs over the old one (your takes stay).
+    // This is a sideload/testing key, kept in the repo on purpose (like Android's own debug key: not a secret).
+    // The Play Store build gets its own private upload key (see APP.md).
+    signingConfigs {
+        sideload {
+            storeFile file('sideload.p12')
+            storeType 'pkcs12'
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.sideload
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

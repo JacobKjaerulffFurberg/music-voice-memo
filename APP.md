@@ -10,6 +10,24 @@ the same code runs on the web, on Android and on iPhone.
 | **Google Play** | $25 once | ~2–3 weeks | See below. |
 | **Apple App Store** | $99 / year | ~1–2 weeks | Needs a Mac (or a cloud Mac). See below. |
 
+## Install on Android (and stay up to date)
+
+1. On the phone, open
+   **https://github.com/JacobKjaerulffFurberg/music-voice-memo/releases/download/android-latest/lofi-your-life.apk**
+   and allow Chrome to install apps when Android asks.
+2. Updates, from inside the app: **More → Update now** (or tap the *New version* sticker that
+   appears on launch). The new version downloads in a few seconds and the app restarts into it.
+   Your takes stay.
+3. When the app shell itself changes (a new native plugin or permission), the button says
+   *Get the new app* and opens the link above; the new APK installs over the old one.
+
+How it works: every deploy publishes `app/version.json` and a zip of the app next to the website
+(`scripts/app-update.mjs`); every Android build replaces the APK on the `android-latest` release.
+Both are stamped with the commit's time. **Bump `versionCode` in `android/app/build.gradle`** whenever
+you add a native plugin or permission: that's how the app knows a web update isn't enough.
+All APKs are signed with `android/app/sideload.p12`, a testing key that's committed on purpose so
+updates install over each other. It isn't secret, so don't use it for the Play Store.
+
 ## Day to day
 
 ```

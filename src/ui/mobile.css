@@ -1390,3 +1390,35 @@ body {
   font-weight: 400;
   font-size: 18px;
 }
+
+/* Updates: the build's date, and the button that fetches a newer one (lit when there is one). */
+.m-upd {
+  grid-template-columns: 1fr auto;
+  grid-auto-flow: row;
+  align-items: center;
+}
+.m-ver {
+  padding-left: 12px;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.m-upd > .m-toggle {
+  padding: 0 16px;
+}
+/* On launch, when something newer is out: a sticker slapped on the top of the page. */
+.m-upd-pill {
+  position: fixed;
+  top: max(58px, calc(env(safe-area-inset-top) + 46px));
+  left: 50%;
+  z-index: 15;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-family: var(--tag);
+  font-size: 16px;
+  box-shadow: var(--sticker);
+  transform: translateX(-50%) rotate(-3deg);
+  animation: m-pop 450ms ease-out;
+}
