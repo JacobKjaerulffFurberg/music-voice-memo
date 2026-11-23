@@ -631,14 +631,14 @@ export class Player {
   private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
     this.voiceBus(ctx);
     const fx = Math.max(0, Math.min(2, Math.round(o.voiceFx ?? 0)));
-    this.voiceWet?.gain.setTargetAtTime(fx === 2 ? 0.04 : Math.max(o.voiceRoom ?? 0.07, fx === 1 ? 0.22 : 0), ctx.currentTime, 0.05);
+    this.voiceWet?.gain.setTargetAtTime(fx === 2 ? 0.04 : Math.max(o.voiceRoom ?? 0.07, fx === 1 ? 0.34 : 0), ctx.currentTime, 0.05);
     if (this.voiceTone) {
       const t = ctx.currentTime;
       this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 500 : 20, t);
       this.voiceTone.low.frequency.setValueAtTime(fx === 2 ? 2600 : 20000, t);
       this.voiceTone.high.Q.value = this.voiceTone.low.Q.value = fx === 2 ? 1.1 : 0.707;
       this.voiceTone.grit.curve = fx === 2 ? VOICE_GRIT : null;
-      this.voiceTone.gain.gain.setValueAtTime(fx === 2 ? 1.7 : 1.2, t);
+      this.voiceTone.gain.gain.setValueAtTime(fx === 2 ? 1.05 : 1.2, t);
     }
     if (this.voiceEcho) {
       // Three quarters of a (relaxed) beat: the repeats fall between the words, in time.
