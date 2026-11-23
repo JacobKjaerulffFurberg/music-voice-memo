@@ -1,11 +1,13 @@
 /**
- * The intro: a quiet moment before the app. Rain on the window, the cat asleep on your lap, the
- * coffee still steaming, and "lo-fi your life" in soft pixel letters. Fades in, stays about four
- * seconds; a tap goes straight on. Shown once per visit (each app launch is a new visit).
+ * The intro: a quiet moment before the app. Rain on the window, a cup of tea steaming on the sill,
+ * and "lo-fi your life" in soft letters. Fades in, stays about four seconds; a tap goes straight on.
+ * Shown once per visit (each app launch is a new visit).
  */
-import '@fontsource/pixelify-sans/latin-400.css';
-import '@fontsource/pixelify-sans/latin-600.css';
-import { playScene } from './cozy';
+import '@fontsource/fraunces/latin-400.css';
+import '@fontsource/fraunces/latin-400-italic.css';
+import '@fontsource/fraunces/latin-600.css';
+import '@fontsource/fraunces/latin-600-italic.css';
+import { playRainScene } from './rain-scene';
 
 const SEEN = 'hum-intro-seen';
 
@@ -19,14 +21,14 @@ export function showIntro(): Promise<void> {
   const el = document.createElement('div');
   el.className = 'intro';
   el.setAttribute('role', 'img');
-  el.setAttribute('aria-label', 'Lo-fi your life: rain on the window, a cat asleep, a warm coffee');
+  el.setAttribute('aria-label', 'Lo-fi your life: rain on the window, a cup of tea');
   el.innerHTML = `
-    <canvas class="intro-scene pixel"></canvas>
-    <h1 class="intro-title">lo-fi <span>your life</span></h1>
+    <canvas class="intro-scene"></canvas>
+    <h1 class="intro-title">lo-fi <em>your life</em></h1>
     <p class="intro-tap">tap to start</p>`;
   document.body.appendChild(el);
-  const scene = playScene(el.querySelector('canvas') as HTMLCanvasElement);
-  scene.start();
+  const scene = playRainScene(el.querySelector('canvas') as HTMLCanvasElement);
+  requestAnimationFrame(() => scene.start());
 
   return new Promise((resolve) => {
     let gone = false;
@@ -37,10 +39,10 @@ export function showIntro(): Promise<void> {
       setTimeout(() => {
         scene.stop();
         el.remove();
-      }, 700);
+      }, 800);
       resolve();
     };
     el.addEventListener('pointerdown', leave);
-    setTimeout(leave, 4200);
+    setTimeout(leave, 4500);
   });
 }

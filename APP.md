@@ -36,7 +36,7 @@ updates install over each other. It isn't secret, so don't use it for the Play S
 npm run app:sync      # build the site, copy it into android/ and ios/
 npm run app:android   # …and open Android Studio (needs Android Studio installed)
 npm run app:ios       # …and open Xcode (Mac only)
-npx vite-node scripts/make-icons.ts   # redraw icons + splash screens from the pixel scene
+node scripts/icons-server.mjs   # then in the dev page console: (await import("/src/dev/icons.ts")).makeIcons()
 ```
 
 `dist-app/` is the site with the phone page as `index.html` (the app always opens `index.html`).

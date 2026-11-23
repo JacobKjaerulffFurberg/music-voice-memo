@@ -23,6 +23,8 @@ export default defineConfig({
     // No hot reload: code edits must never reload the page while someone is recording.
     // Refresh the page yourself to pick up changes.
     hmr: false,
+    // Dev tool only: icons rendered in the page go to scripts/icons-server.mjs (see src/dev/icons.ts).
+    proxy: { '/__icons': { target: 'http://127.0.0.1:4190', rewrite: (p) => p.replace(/^\/__icons/, '') } },
   },
   test: {
     environment: 'node',
