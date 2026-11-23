@@ -74,9 +74,37 @@ export async function installWebUpdate(u: { version: number; url: string; checks
   }
 }
 
-/** Open the new APK's download in the phone's browser; Android then offers to install it. */
-export function installApk(url: string): void {
-  window.location.href = url;
+interface ApkInstaller {
+  canInstall(): Promise<{ allowed: boolean }>;
+  openInstallSettings(): Promise<void>;
+  downloadAndInstall(o: { url: string }): Promise<void>;
+  addListener(event: 'progress', cb: (e: { percent: number }) => void): Promise<{ remove: () => Promise<void> }>;
+}
+
+/**
+ * Get the new app. With the app's own installer (versionCode 4 on): downloaded inside the app and
+ * handed straight to Android's "Update" prompt; the file is cleaned up afterwards. The first time,
+ * Android wants a one-time "allow this app to install updates": we open that switch and say so.
+ * Older builds without it: the download opens in the browser instead.
+ */
+export async function installApk(url: string, onProgress?: (done: number) => void): Promise<'installing' | 'allow-first' | 'browser'> {
+  const { Capacitor, registerPlugin } = await import('@capacitor/core');
+  if (!Capacitor.isPluginAvailable('ApkInstaller')) {
+    window.location.href = url;
+    return 'browser';
+  }
+  const apk = registerPlugin<ApkInstaller>('ApkInstaller');
+  if (!(await apk.canInstall()).allowed) {
+    await apk.openInstallSettings();
+    return 'allow-first';
+  }
+  const sub = onProgress ? await apk.addListener('progress', (e) => onProgress(Math.min(1, e.percent / 100))) : null;
+  try {
+    await apk.downloadAndInstall({ url });
+    return 'installing';
+  } finally {
+    await sub?.remove();
+  }
 }
 
 /** Tell the updater this build started fine (otherwise it rolls back to the previous one). */

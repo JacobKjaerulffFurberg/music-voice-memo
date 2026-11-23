@@ -19,7 +19,9 @@ the same code runs on the web, on Android and on iPhone.
    appears on launch). The new version downloads in a few seconds and the app restarts into it.
    Your takes stay.
 3. When the app shell itself changes (a new native plugin or permission), the button says
-   *Get the new app* and opens the link above; the new APK installs over the old one.
+   *Get the new app*: it downloads inside the app and Android shows its own *Update* prompt
+   (the first time, Android asks once to allow this app to install updates). Nothing lands in
+   Downloads, and the file is deleted afterwards.
 
 How it works: every deploy publishes `app/version.json` and a zip of the app next to the website
 (`scripts/app-update.mjs`); every Android build replaces the APK on the `android-latest` release.
@@ -42,6 +44,10 @@ App id: `app.lofiyourlife.hum`, name: *Lo-fi Your Life* — both in `capacitor.c
 Change the id **before** the first store upload; it can never change afterwards.
 
 ## Google Play
+
+Before the first Play upload: remove `REQUEST_INSTALL_PACKAGES` from
+`android/app/src/main/AndroidManifest.xml` (Play only allows it for app stores and similar), and
+let Play deliver new versions. In-app web updates keep working as they are.
 
 1. Make a developer account at play.google.com/console ($25, ID check takes a few days).
 2. Make an upload key once (keep the file and passwords safe, forever):

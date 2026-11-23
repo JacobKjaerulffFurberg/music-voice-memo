@@ -377,15 +377,35 @@ export function mountMobile(root: HTMLElement): void {
     updBtn.textContent = u.kind === 'web' ? 'Update now' : u.kind === 'apk' ? 'Get the new app' : u.kind === 'offline' ? 'Offline · retry' : 'Up to date ✓';
     updPill.hidden = !news;
   };
+  /** The new app (the shell changed): fetched and installed from in here, with the same loader. */
+  async function runApkUpdate(url: string): Promise<void> {
+    stopPlayback();
+    updPill.hidden = true;
+    busy.hidden = false;
+    busyActs.hidden = true;
+    busyWord.classList.remove('ready');
+    busyLoad.innerHTML = LOAD_TUNE.map((y) => `<i style="--y:${y}px"></i>`).join('');
+    const dots = [...busyLoad.querySelectorAll<HTMLElement>('i')];
+    busyWord.textContent = 'fetching the new app';
+    try {
+      const how = await installApk(url, (p) => dots.forEach((d, k) => d.classList.toggle('on', k < Math.round(p * dots.length))));
+      busyWord.textContent =
+        how === 'installing' ? 'tap Update to finish' : how === 'allow-first' ? 'allow updates for this app, then tap Update again' : 'opening the download';
+    } catch (e) {
+      busyWord.textContent = `couldn't get it: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    busyShare.hidden = true;
+    busyActs.hidden = false;
+  }
   async function runUpdate(): Promise<void> {
-    if (upd.kind === 'apk') return installApk(upd.url);
+    if (upd.kind === 'apk') return runApkUpdate(upd.url);
     let u: UpdateState = upd;
     if (u.kind !== 'web') {
       // Not known to be newer yet: ask first. A new app shell then waits for one more tap.
       updBtn.textContent = 'Checking…';
       u = await checkForUpdate();
       showUpdate(u);
-      if (u.kind !== 'web') return;
+      if (u.kind !== 'web') return; // a new app: the button now says so; the next tap gets it
     }
     stopPlayback();
     updPill.hidden = true;
@@ -403,7 +423,8 @@ export function mountMobile(root: HTMLElement): void {
       busyWord.textContent = `couldn't update here: ${e instanceof Error ? e.message : String(e)}`;
       busyShare.hidden = false;
       busyShare.textContent = 'Install the new app';
-      busyShare.onclick = () => installApk(u.apk);
+      const apkUrl = u.apk;
+      busyShare.onclick = () => void runApkUpdate(apkUrl);
       busyActs.hidden = false;
     }
   }
