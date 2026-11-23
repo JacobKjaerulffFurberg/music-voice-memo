@@ -186,6 +186,14 @@ export function mountMobile(root: HTMLElement): void {
   const stage = $<HTMLElement>('m-stage');
   const result = $<HTMLElement>('m-result');
   const recBtn = $<HTMLButtonElement>('m-rec');
+  root.addEventListener('pointerdown', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('.m-rec, .m-play, .m-side');
+    if (!b) return;
+    const ring = document.createElement('i');
+    ring.className = 'm-ripple';
+    ring.addEventListener('animationend', () => ring.remove());
+    b.appendChild(ring);
+  });
   const live = $<HTMLDivElement>('m-live');
   const timer = $<HTMLDivElement>('m-timer');
   const hint = $<HTMLParagraphElement>('m-hint');
@@ -542,7 +550,15 @@ export function mountMobile(root: HTMLElement): void {
   }
 
   stage.dataset.view = view;
+  /** Replay the stage's entrance (on each view change, and when the intro hands over). */
+  function arrive(): void {
+    stage.classList.remove('m-swap');
+    void stage.offsetWidth;
+    stage.classList.add('m-swap');
+  }
+  document.addEventListener('intro-done', arrive);
   function setView(v: View): void {
+    if (v !== view) arrive();
     view = v;
     stage.hidden = v === 'result';
     stage.dataset.view = v;
@@ -1008,6 +1024,15 @@ export function mountMobile(root: HTMLElement): void {
   }
 
   const picker = $<HTMLDivElement>('m-picker');
+  /** Slide a sheet away, then hide it. */
+  function closeSheet(el: HTMLElement): void {
+    if (el.hidden || el.classList.contains('out')) return;
+    el.classList.add('out');
+    setTimeout(() => {
+      el.hidden = true;
+      el.classList.remove('out');
+    }, 230);
+  }
   const pickerBody = $<HTMLDivElement>('m-picker-body');
   function openPicker(i: number): void {
     const c = chords[i];
@@ -1039,7 +1064,7 @@ export function mountMobile(root: HTMLElement): void {
     picker.hidden = false;
   }
   picker.addEventListener('click', (e) => {
-    if (e.target === picker) picker.hidden = true;
+    if (e.target === picker) closeSheet(picker);
   });
 
   // Tap a chord = pick it; swipe it up / down = the next / previous best fit.
@@ -1122,7 +1147,7 @@ export function mountMobile(root: HTMLElement): void {
     openKeys();
   });
   keysSheet.addEventListener('click', (e) => {
-    if (e.target === keysSheet) keysSheet.hidden = true;
+    if (e.target === keysSheet) closeSheet(keysSheet);
   });
   $<HTMLButtonElement>('m-key-fact').addEventListener('click', openKeys);
 
@@ -1861,10 +1886,11 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
   async function openSheet(): Promise<void> {
     const takes = await listRecordings();
     listEl.innerHTML = takes.length ? '' : '<div class="m-empty">No ideas yet</div>';
-    for (const m of takes) {
+    for (const [idx, m] of takes.entries()) {
       const s = effectiveSettings(m.analysis, m.overrides);
       const row = document.createElement('div');
       row.className = 'm-take' + (m.id === current?.id ? ' cur' : '');
+      row.style.setProperty('--i', String(idx));
       const main = document.createElement('button');
       main.className = 'm-take-main';
       const b = document.createElement('b');
@@ -1894,7 +1920,7 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
     sheet.hidden = false;
   }
   async function open(id: string): Promise<void> {
-    sheet.hidden = true;
+    closeSheet(sheet);
     stopPlayback();
     const rec = await loadRecording(id);
     if (!rec) return;
@@ -1910,7 +1936,7 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
   }
   $<HTMLButtonElement>('m-takes').addEventListener('click', () => void openSheet());
   sheet.addEventListener('click', (e) => {
-    if (e.target === sheet) sheet.hidden = true;
+    if (e.target === sheet) closeSheet(sheet);
   });
 
   setView('idle');

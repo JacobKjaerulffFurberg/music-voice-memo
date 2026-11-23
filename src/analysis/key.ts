@@ -38,7 +38,7 @@ export function pitchClassHistogram(notes: Note[]): Float64Array {
 }
 
 /** Score all 24 keys against a pitch-class histogram. */
-export function keyFromHistogram(hist: ArrayLike<number>, source: KeyResult['source']): KeyResult | null {
+export function keyFromHistogram(hist: ArrayLike<number>, source: KeyResult['source'], bonus?: (tonic: number, mode: Mode) => number): KeyResult | null {
   let total = 0;
   for (let i = 0; i < 12; i++) total += hist[i];
   if (!(total > 0)) return null;
@@ -47,7 +47,7 @@ export function keyFromHistogram(hist: ArrayLike<number>, source: KeyResult['sou
   for (const mode of ['major', 'minor'] as Mode[]) {
     const profile = mode === 'major' ? KK_MAJOR : KK_MINOR;
     for (let tonic = 0; tonic < 12; tonic++) {
-      all.push({ tonic, mode, name: keyName(tonic, mode), score: pearson(hist, profile, tonic) });
+      all.push({ tonic, mode, name: keyName(tonic, mode), score: pearson(hist, profile, tonic) + (bonus?.(tonic, mode) ?? 0) });
     }
   }
   all.sort((p, q) => q.score - p.score);
@@ -67,9 +67,17 @@ export function keyFromHistogram(hist: ArrayLike<number>, source: KeyResult['sou
   };
 }
 
+/**
+ * Near-ties between keys that share most notes (F major / A minor / C major) are settled the way a
+ * listener would: a sung melody usually comes home to its tonic at the end, and a hummed idea is
+ * more often major. Both nudges are small next to a clear histogram.
+ */
 export function estimateKeyFromNotes(notes: Note[]): KeyResult | null {
   if (notes.length < 3) return null;
-  return keyFromHistogram(pitchClassHistogram(notes), 'notes-ks');
+  const pc = (m: number): number => ((Math.round(m) % 12) + 12) % 12;
+  const last = [...notes].sort((a, b) => a.start + a.duration - (b.start + b.duration)).at(-1);
+  const home = last ? pc(last.midi) : -1;
+  return keyFromHistogram(pitchClassHistogram(notes), 'notes-ks', (tonic, mode) => (tonic === home ? 0.05 : 0) + (mode === 'major' ? 0.03 : 0));
 }
 
 /** Fallback "audio" key when essentia is unavailable: KS on voiced f0 frames (tuning-corrected). */

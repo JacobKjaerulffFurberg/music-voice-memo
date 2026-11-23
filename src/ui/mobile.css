@@ -1467,3 +1467,186 @@ body::after {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* =====================================================================================
+   MOTION: everything arrives and leaves; nothing just snaps. Soft springs, 200–450 ms.
+   ===================================================================================== */
+button {
+  transition:
+    transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    background-color 220ms ease,
+    color 220ms ease,
+    opacity 220ms ease;
+}
+button:active {
+  transform: scale(0.93);
+}
+.m-play,
+.m-side {
+  position: relative;
+}
+/* The ring a round button sends out when pressed. */
+.m-ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  animation: m-ripple 650ms ease-out forwards;
+}
+@keyframes m-ripple {
+  from {
+    transform: scale(0.8);
+    opacity: 0.7;
+  }
+  to {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+
+/* Stage: the parts rise in, the record button springs in. */
+.m-stage.m-swap > * {
+  animation: m-rise-in 420ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.m-stage.m-swap > *:nth-child(2) {
+  animation-delay: 60ms;
+}
+.m-stage.m-swap > *:nth-child(3) {
+  animation-delay: 120ms;
+}
+.m-stage.m-swap .m-rec {
+  animation: m-pop-in 560ms cubic-bezier(0.34, 1.56, 0.64, 1) 80ms both;
+}
+.m-stage.m-swap .m-room {
+  animation: m-drop-in 520ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+/* Result (edit the take): its rows come in one after another. */
+.m-result:not([hidden]) > * {
+  animation: m-rise-in 440ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.m-result:not([hidden]) > *:nth-child(2) {
+  animation-delay: 40ms;
+}
+.m-result:not([hidden]) > *:nth-child(3) {
+  animation-delay: 80ms;
+}
+.m-result:not([hidden]) > *:nth-child(4) {
+  animation-delay: 120ms;
+}
+.m-result:not([hidden]) > *:nth-child(5) {
+  animation-delay: 160ms;
+}
+.m-result:not([hidden]) > *:nth-child(n + 6) {
+  animation-delay: 200ms;
+}
+
+/* Sheets: the dim fades, the panel slides up; leaving, the other way. */
+.m-sheet:not([hidden]),
+.m-busy:not([hidden]) {
+  animation: m-fade 240ms ease both;
+}
+.m-sheet:not([hidden]) .m-sheet-panel {
+  animation: m-slide-up 380ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.m-sheet.out {
+  animation: m-fade-out 230ms ease both;
+}
+.m-sheet.out .m-sheet-panel {
+  animation: m-slide-down 230ms cubic-bezier(0.5, 0, 0.8, 0.4) both;
+}
+/* The list of ideas: one after another. */
+.m-take {
+  animation: m-rise-in 400ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation-delay: calc(min(var(--i, 0), 12) * 40ms + 90ms);
+}
+.m-toast.show {
+  transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Intro: the button springs in and sends slow rings out; leaving, it grows into the page. */
+.intro-rec {
+  position: relative;
+  animation: m-pop-in 800ms cubic-bezier(0.34, 1.56, 0.64, 1) 100ms both;
+}
+.intro-rec::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 2px solid rgba(224, 164, 90, 0.5);
+  animation: m-ring 2.2s ease-out 700ms infinite;
+}
+@keyframes m-ring {
+  from {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+.intro {
+  transition:
+    opacity 600ms ease,
+    transform 600ms ease;
+}
+.intro.out {
+  transform: scale(1.06);
+}
+.intro.out .intro-rec {
+  transform: scale(1.15);
+  transition: transform 600ms ease;
+}
+
+@keyframes m-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+@keyframes m-drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+@keyframes m-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+@keyframes m-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes m-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes m-slide-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+@keyframes m-slide-down {
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

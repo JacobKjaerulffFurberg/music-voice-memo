@@ -32,6 +32,7 @@ export function showIntro(): Promise<void> {
       if (gone) return;
       gone = true;
       el.classList.add('out');
+      document.dispatchEvent(new Event('intro-done'));
       setTimeout(() => el.remove(), 800);
       resolve();
     };
