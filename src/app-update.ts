@@ -22,6 +22,8 @@ interface Published {
   version: number;
   /** The zip, relative to version.json. */
   url: string;
+  /** SHA-256 of the zip (lowercase hex): the updater refuses a zip without one, or one that doesn't match. */
+  checksum?: string;
   /** The app shell's version code those web files need. */
   native: number;
   /** Where the newest APK is. */
@@ -30,7 +32,7 @@ interface Published {
 
 export type UpdateState =
   | { kind: 'current' }
-  | { kind: 'web'; version: number; url: string }
+  | { kind: 'web'; version: number; url: string; checksum: string; apk: string }
   | { kind: 'apk'; url: string }
   | { kind: 'offline' };
 
@@ -55,16 +57,17 @@ export async function checkForUpdate(): Promise<UpdateState> {
   if (!(pub.version > BUILD)) return { kind: 'current' };
   const { App } = await import('@capacitor/app');
   const shell = Number((await App.getInfo()).build) || 1;
-  if (pub.native > shell) return { kind: 'apk', url: pub.apk };
-  return { kind: 'web', version: pub.version, url: new URL(pub.url, VERSION_URL).href };
+  // A web build without a checksum can't be installed in place: the new app is the way then.
+  if (pub.native > shell || !pub.checksum) return { kind: 'apk', url: pub.apk };
+  return { kind: 'web', version: pub.version, url: new URL(pub.url, VERSION_URL).href, checksum: pub.checksum, apk: pub.apk };
 }
 
 /** Download the newer web build and restart into it. `onProgress` gets 0–1. */
-export async function installWebUpdate(u: { version: number; url: string }, onProgress?: (done: number) => void): Promise<void> {
+export async function installWebUpdate(u: { version: number; url: string; checksum: string }, onProgress?: (done: number) => void): Promise<void> {
   const { CapacitorUpdater } = await import('@capgo/capacitor-updater');
   const sub = onProgress ? await CapacitorUpdater.addListener('download', (e) => onProgress(Math.min(1, (e.percent ?? 0) / 100))) : null;
   try {
-    const bundle = await CapacitorUpdater.download({ url: u.url, version: String(u.version) });
+    const bundle = await CapacitorUpdater.download({ url: u.url, version: String(u.version), checksum: u.checksum });
     await CapacitorUpdater.set(bundle); // restarts the app in the new build
   } finally {
     await sub?.remove();

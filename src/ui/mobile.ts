@@ -377,8 +377,11 @@ export function mountMobile(root: HTMLElement): void {
       await installWebUpdate(u, (p) => dots.forEach((d, k) => d.classList.toggle('on', k < Math.round(p * dots.length))));
       busyWord.textContent = 'restarting'; // the app reloads into the new build
     } catch (e) {
-      busyWord.textContent = `couldn't update: ${e instanceof Error ? e.message : String(e)}`;
-      busyShare.hidden = true;
+      // In-place didn't work: the whole new app always does (it installs over this one, takes kept).
+      busyWord.textContent = `couldn't update here: ${e instanceof Error ? e.message : String(e)}`;
+      busyShare.hidden = false;
+      busyShare.textContent = 'Install the new app';
+      busyShare.onclick = () => installApk(u.apk);
       busyActs.hidden = false;
     }
   }
