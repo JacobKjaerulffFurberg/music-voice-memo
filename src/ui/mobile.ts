@@ -67,6 +67,7 @@ const TEMPLATE = `
     <div class="m-stage-bot">
       <div class="m-live" id="m-live"></div>
       <div class="m-timer" id="m-timer"></div>
+      <button class="m-tap" id="m-tap" aria-label="Tap the tempo four times, then sing after four clicks"><span class="m-tap-dots" id="m-tap-dots"><i></i><i></i><i></i><i></i></span><b id="m-tap-label">tap tempo</b></button>
       <p class="m-hint" id="m-hint">Sing</p>
     </div>
   </section>
@@ -636,6 +637,8 @@ export function mountMobile(root: HTMLElement): void {
     }
     const { samples, sampleRate } = await recorder.stop();
     if (samples.length < sampleRate * 0.6) {
+      tappedBpm = null;
+      resetTap();
       setView('idle');
       hint.textContent = 'Too short';
       return;
@@ -656,10 +659,118 @@ export function mountMobile(root: HTMLElement): void {
       wearVibe(current, start);
       paint(start.id);
     }
+    const bpm = tappedBpm;
+    tappedBpm = null;
+    resetTap();
+    if (bpm) current.overrides.bpm = bpm;
     await saveRecording(current).catch(() => undefined);
     await analyze('normal');
+    if (bpm && current?.analysis) {
+      const fb = fitGridAtBpm(onsetsFromNotes(current.analysis.notes), bpm);
+      if (fb !== null) {
+        current.overrides.firstBeatMs = Math.round(fb * 1000);
+        current.overrides.firstBeatAuto = true;
+      }
+      await saveRecording(current, false).catch(() => undefined);
+      render();
+    }
   }
-  recBtn.addEventListener('click', () => void toggleRecord());
+  // ---------- tap tempo + count-in ----------
+  // Four taps on "tap tempo" set the beat; four clicks follow at that tempo, and recording starts on
+  // the next beat. The take is then built on that tempo (only its phase is fitted to the singing).
+  const tapBtn = $<HTMLButtonElement>('m-tap');
+  const tapDots = [...$<HTMLElement>('m-tap-dots').querySelectorAll('i')];
+  const tapLabel = $<HTMLElement>('m-tap-label');
+  let clickCtx: AudioContext | null = null;
+  let taps: number[] = [];
+  let countIn: number[] = [];
+  /** Tempo for the next take, from the taps (null = let the analysis find it). */
+  let tappedBpm: number | null = null;
+  function click(at: number, accent: boolean): void {
+    if (!clickCtx) return;
+    const o = clickCtx.createOscillator();
+    const g = clickCtx.createGain();
+    o.frequency.value = accent ? 1760 : 1175;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(0.5, at + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.06);
+    o.connect(g).connect(clickCtx.destination);
+    o.start(at);
+    o.stop(at + 0.08);
+  }
+  function lightDots(n: number): void {
+    tapDots.forEach((d, i) => d.classList.toggle('hot', i < n));
+    tapBtn.classList.remove('beat');
+    void tapBtn.offsetWidth;
+    tapBtn.classList.add('beat');
+  }
+  function resetTap(): void {
+    countIn.forEach((t) => clearTimeout(t));
+    countIn = [];
+    taps = [];
+    tapBtn.classList.remove('counting');
+    tapDots.forEach((d) => d.classList.remove('hot'));
+    tapLabel.textContent = tappedBpm ? `♩ ${Math.round(tappedBpm)}` : 'tap tempo';
+  }
+  tapBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (view !== 'idle') return;
+    if (countIn.length) {
+      // Tapping again mid count-in starts over.
+      tappedBpm = null;
+      resetTap();
+    }
+    clickCtx ??= new AudioContext({ latencyHint: 'interactive' });
+    void clickCtx.resume();
+    void recorder.warm().catch(() => undefined); // so recording can start on the beat
+    const now = clickCtx.currentTime;
+    if (taps.length && now - taps[taps.length - 1] > 2) taps = [];
+    taps.push(now);
+    click(now, taps.length === 1);
+    lightDots(taps.length);
+    if (taps.length < 4) {
+      tapLabel.textContent = taps.length === 1 ? 'tap' : 'tap…';
+      return;
+    }
+    // The beat: the average gap of the taps, in a singable range.
+    const P = (taps[3] - taps[0]) / 3;
+    tappedBpm = Math.max(40, Math.min(220, 60 / P));
+    const beat = 60 / tappedBpm;
+    tapLabel.textContent = `♩ ${Math.round(tappedBpm)}`;
+    tapBtn.classList.add('counting');
+    const t0 = taps[3];
+    taps = [];
+    // Four clicks, then record on the beat after.
+    for (let k = 1; k <= 5; k++) {
+      const at = t0 + k * beat;
+      if (k <= 4) click(at, k === 1);
+      countIn.push(
+        window.setTimeout(
+          () => {
+            if (k <= 4) {
+              lightDots(5 - k);
+              hint.textContent = String(5 - k);
+            } else {
+              countIn = [];
+              tapBtn.classList.remove('counting');
+              void toggleRecord();
+            }
+          },
+          Math.max(0, (at - (clickCtx?.currentTime ?? 0)) * 1000 - (k === 5 ? 40 : 0)),
+        ),
+      );
+    }
+  });
+
+  recBtn.addEventListener('click', () => {
+    // Record during a count-in: start now, keep the tapped tempo.
+    if (countIn.length) {
+      countIn.forEach((t) => clearTimeout(t));
+      countIn = [];
+      tapBtn.classList.remove('counting');
+    }
+    void toggleRecord();
+  });
   $<HTMLButtonElement>('m-new').addEventListener('click', async () => {
     if (layering) await finishLayer(false);
     stopPlayback();

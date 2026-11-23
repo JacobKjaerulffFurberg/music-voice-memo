@@ -1317,7 +1317,6 @@ body::after {
   user-select: none;
   -webkit-user-select: none;
   background: radial-gradient(90% 60% at 50% 40%, #2a2118, #120e0a 75%);
-  animation: intro-in 900ms ease both;
   transition: opacity 700ms ease;
 }
 .intro.out {
@@ -1568,7 +1567,6 @@ button:active {
 /* Intro: the button springs in and sends slow rings out; leaving, it grows into the page. */
 .intro-rec {
   position: relative;
-  animation: m-pop-in 800ms cubic-bezier(0.34, 1.56, 0.64, 1) 100ms both;
 }
 .intro-rec::before {
   content: '';
@@ -1649,4 +1647,54 @@ button:active {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
+}
+
+/* Tap tempo: a quiet pill under the record button. Four dots light with the taps, then count down. */
+.m-tap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  color: var(--muted);
+  font-family: var(--serif);
+  font-size: 15px;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.m-tap b {
+  font-weight: 400;
+  min-width: 64px;
+  text-align: left;
+}
+.m-tap-dots {
+  display: flex;
+  gap: 5px;
+}
+.m-tap-dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 18%, transparent);
+  transition: background-color 120ms ease;
+}
+.m-tap-dots i.hot {
+  background: var(--accent);
+}
+.m-tap.counting {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-2));
+}
+.m-tap.beat {
+  animation: m-tick 220ms ease-out;
+}
+@keyframes m-tick {
+  30% {
+    transform: scale(1.06);
+  }
+}
+.m-stage:not([data-view='idle']) .m-tap {
+  display: none;
 }
