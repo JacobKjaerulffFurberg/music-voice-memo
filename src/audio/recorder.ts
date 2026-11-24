@@ -26,6 +26,8 @@ export interface RecorderCallbacks {
   onLevel?: (peak: number, rms: number) => void;
   /** Mic armed / released. */
   onWarmChange?: (warm: boolean) => void;
+  /** The mic went away mid-take (a call, another app, unplugged): call stop() to keep what was sung. */
+  onCutOff?: () => void;
 }
 
 export interface RecorderOptions {
@@ -56,6 +58,8 @@ export class Recorder {
   private preRollSamples = 0;
   private waiters: { started?: () => void; stopped?: () => void } = {};
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The mic was lost while recording: stop() returns what was caught, then lets go of the mic. */
+  private cutOff = false;
   private readonly o: RecorderOptions;
 
   constructor(
@@ -152,7 +156,18 @@ export class Recorder {
       // cheap and is called again from the record press.
       void ctx.resume().catch(() => undefined);
       // If the mic goes away (unplugged, permission revoked), drop the graph.
-      stream.getAudioTracks().forEach((t) => t.addEventListener('ended', () => this.release()));
+      // Mid-take, the recording is kept: stop() is asked for, and lets go of the mic after.
+      const lost = (): void => {
+        if (!this.recording) return this.release();
+        if (this.cutOff) return;
+        this.cutOff = true;
+        if (this.cb.onCutOff) this.cb.onCutOff();
+      };
+      stream.getAudioTracks().forEach((t) => t.addEventListener('ended', lost));
+      // iOS: a phone call interrupts the audio session.
+      ctx.addEventListener('statechange', () => {
+        if ((ctx.state as string) === 'interrupted' && this.recording) lost();
+      });
       this.graph = { ctx, stream, source, node, sink, monitor, analyser };
       this.cb.onWarmChange?.(true);
       this.armIdleRelease();
@@ -191,6 +206,7 @@ export class Recorder {
     if (g.ctx.state !== 'running') await g.ctx.resume();
     this.chunks = [];
     this.preRollSamples = 0;
+    this.cutOff = false;
     this.recording = true;
     stayAwake('recording', true); // the screen mustn't sleep mid-take
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -208,7 +224,8 @@ export class Recorder {
   async stop(): Promise<Recording> {
     const g = this.graph;
     if (!g || !this.recording) throw new Error('Not recording');
-    await new Promise<void>((resolve) => {
+    // A lost mic won't answer: keep what already came in.
+    if (!this.cutOff && g.ctx.state === 'running') await new Promise<void>((resolve) => {
       const t = setTimeout(resolve, 500);
       this.waiters.stopped = () => {
         clearTimeout(t);
@@ -229,7 +246,21 @@ export class Recorder {
       o += c.length;
     }
     this.chunks = [];
+    if (this.cutOff) {
+      this.cutOff = false;
+      this.release();
+    }
     return { samples, sampleRate: g.ctx.sampleRate, preRollSamples: this.preRollSamples };
+  }
+
+  /** Recorded chunks from index `from` on, while recording (for saving the take as it grows). */
+  chunksFrom(from: number): Float32Array[] {
+    return this.recording ? this.chunks.slice(from) : [];
+  }
+
+  /** The mic's sample rate, when it's open. */
+  get sampleRate(): number | null {
+    return this.graph?.ctx.sampleRate ?? null;
   }
 
   /** Close the mic and audio graph (the browser's mic indicator turns off). */

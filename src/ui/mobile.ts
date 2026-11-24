@@ -22,7 +22,8 @@ import { alignToGrid, lofiDownbeat } from '../music/lofi';
 import { takeChords } from '../music/progression';
 import type { Mode } from '../analysis/types';
 import { velocityOf } from '../analysis/velocity';
-import { deleteRecording, listRecordings, loadRecording, saveRecording } from '../storage/db';
+import { beatPulse } from '../haptics';
+import { appendDraft, clearDraft, deleteRecording, listRecordings, loadRecording, saveRecording as storeRecording, takeDraft } from '../storage/db';
 import { Player, type PlayOptions } from './player';
 import { tuneVoice } from '../music/tune';
 import { encodeMp3, fileName, handOver, isNativeApp } from '../export/mp3';
@@ -48,6 +49,7 @@ const ICON = {
   keys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 13v6M15 13v6"/><path d="M7.5 5v8h3V5M13.5 5v8h3V5"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
   wand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>',
+  undo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/><path d="M20 4l.5 1.5L22 6l-1.5.5L20 8l-.5-1.5L18 6l1.5-.5z" fill="currentColor"/></svg>',
@@ -59,7 +61,10 @@ const TEMPLATE = `
   <header class="m-top">
     <button class="m-icon" id="m-takes" aria-label="Takes">${ICON.list}</button>
     <span class="m-title" id="m-title" aria-label="Rename"></span>
-    <button class="m-icon" id="m-adv" aria-label="More controls" aria-pressed="false">${ICON.more}</button>
+    <span class="m-top-r">
+      <button class="m-icon" id="m-undo" aria-label="Undo" hidden>${ICON.undo}</button>
+      <button class="m-icon" id="m-adv" aria-label="More controls" aria-pressed="false">${ICON.more}</button>
+    </span>
   </header>
 
   <section class="m-stage" id="m-stage">
@@ -108,10 +113,6 @@ const TEMPLATE = `
       <button class="m-toggle" id="t-rain" aria-pressed="false">Rain</button>
       <button class="m-toggle" id="t-loop" aria-pressed="true">Loop</button>
     </div>
-    <div class="m-track m-more">
-      <button class="m-toggle" id="t-essentia" aria-pressed="true" aria-label="Essentia: extra key and tempo reading from the raw audio">Essentia</button>
-      <button class="m-toggle" id="m-relisten" aria-label="Listen to this take again with the current settings">Re-listen</button>
-    </div>
     <div class="m-track m-more m-upd">
       <span class="m-ver" id="m-ver"></span>
       <button class="m-toggle" id="m-update" hidden>Check for update</button>
@@ -128,6 +129,7 @@ const TEMPLATE = `
   <div class="m-sheet" id="m-sheet" hidden>
     <div class="m-sheet-panel"><div class="m-sheet-grip"></div><div id="m-list"></div></div>
   </div>
+  <div class="m-gone" id="m-gone" hidden><span id="m-gone-name"></span><button id="m-gone-undo">Undo</button></div>
   <div class="m-sheet" id="m-picker" hidden>
     <div class="m-sheet-panel"><div class="m-sheet-grip"></div><div id="m-picker-body"></div></div>
   </div>
@@ -361,27 +363,6 @@ export function mountMobile(root: HTMLElement): void {
 
   // Essentia (in More): the WASM library's extra reading of key and tempo from the raw audio.
   // Off = our own analysis only (smaller, about twice as fast). Applies to the next listen; Re-listen redoes this take.
-  const essBtn = $<HTMLButtonElement>('t-essentia');
-  const essentiaOn = (): boolean => on(essBtn);
-  try {
-    essBtn.setAttribute('aria-pressed', String(localStorage.getItem('hum-essentia') !== 'off'));
-  } catch {
-    // No storage: on.
-  }
-  essBtn.addEventListener('click', () => {
-    const now = !essentiaOn();
-    essBtn.setAttribute('aria-pressed', String(now));
-    try {
-      localStorage.setItem('hum-essentia', now ? 'on' : 'off');
-    } catch {
-      // Private mode: just not remembered.
-    }
-  });
-  $<HTMLButtonElement>('m-relisten').addEventListener('click', () => {
-    if (!current || view === 'analyzing') return;
-    stopPlayback();
-    void analyze(current.analysis?.quality === 'high' ? 'high' : 'normal');
-  });
 
   // Updates (in More, and a sticker on launch when there is one): the app fetches the newest
   // version itself. On the website the newest always loads, so there it only says which build this is.
@@ -527,6 +508,21 @@ export function mountMobile(root: HTMLElement): void {
         c.fillText(noteName(m), W - 22, y(m) - 8);
       }
     }
+    // Tapped in: the beat you set runs under the singing, a stronger line on each bar's one.
+    if (pulse && clickCtx) {
+      const lag = clickCtx.currentTime - now; // click clock → roll clock
+      const first = Math.ceil((now - win - 0.5 + lag - pulse.t0) / pulse.beat);
+      const last = Math.floor((now + lag - pulse.t0) / pulse.beat);
+      for (let n = first; n <= last; n++) {
+        const bx = Math.round(x(pulse.t0 + n * pulse.beat - lag));
+        if (bx < 0) continue;
+        const one = (((n - 1) % 4) + 4) % 4 === 0; // the count-in's accent was beat one
+        c.fillStyle = cs.getPropertyValue(one ? '--muted' : '--faint').trim();
+        c.globalAlpha = one ? 0.55 : 1;
+        c.fillRect(bx, 0, one ? 2 : 1, H);
+      }
+      c.globalAlpha = 1;
+    }
     c.strokeStyle = cs.getPropertyValue('--fg').trim();
     c.lineWidth = 3;
     c.lineJoin = 'round';
@@ -581,6 +577,8 @@ export function mountMobile(root: HTMLElement): void {
       title.classList.remove('can');
     }
     if (v === 'recording') hint.textContent = '';
+    paintUndo();
+    root.querySelector('#m-adv')?.classList.toggle('away', v !== 'result');
   }
 
   // Idle: the hint drifts slowly between the things you can record.
@@ -600,11 +598,63 @@ export function mountMobile(root: HTMLElement): void {
   // ---------- recording ----------
   const recorder = new Recorder({
     onLevel: (peak) => recBtn.style.setProperty('--lvl', String(1 + Math.min(0.45, peak * 1.6))),
+    // A call or another app took the mic: keep what was sung so far.
+    onCutOff: () => {
+      if (layering) void finishLayer(false);
+      else if (view === 'recording') {
+        cutOff = true;
+        void toggleRecord();
+      }
+    },
   });
+  let cutOff = false;
+  /** Friendly words for why the mic won't open. */
+  function micTrouble(e: unknown): string {
+    const n = e instanceof DOMException ? e.name : '';
+    if (n === 'NotAllowedError' || n === 'SecurityError') return 'Allow the mic in settings';
+    if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'No mic found';
+    if (n === 'NotReadableError' || n === 'AbortError') return 'The mic is busy in another app';
+    return 'The mic isn\'t available';
+  }
+  const ideaName = (d: Date): string =>
+    `Idea ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+
+  // While recording, the take is saved piece by piece: if the app is closed, crashes or
+  // the phone kills it mid-take, it comes back as a take the next time the app opens.
+  let draftAt = 0;
+  let flushed = 0;
+  let drafting: Promise<unknown> = Promise.resolve();
+  function flushDraft(): void {
+    if (view !== 'recording' || !recorder.isRecording) return;
+    const fresh = recorder.chunksFrom(flushed);
+    const sr = recorder.sampleRate;
+    if (!fresh.length || !sr) return;
+    flushed += fresh.length;
+    const at = draftAt;
+    drafting = drafting.then(() => appendDraft(at, sr, fresh)).catch(() => undefined);
+  }
+  function dropDraft(at: number): void {
+    drafting = drafting.then(() => clearDraft(at)).catch(() => undefined);
+  }
+  setInterval(flushDraft, 3000);
+  window.addEventListener('pagehide', flushDraft);
+  void (async () => {
+    const d = await takeDraft();
+    if (!d) return;
+    if (d.samples.length >= d.sampleRate * 0.6) {
+      const rec: StoredRecording = { id: newId(), name: ideaName(new Date(d.startedAt)), createdAt: d.startedAt, sampleRate: d.sampleRate, samples: d.samples, analysis: null, overrides: {} };
+      const start = VIBES.find((v) => v.id === DEFAULT_VIBE);
+      if (start) wearVibe(rec, start);
+      await storeRecording(rec);
+      if (view === 'idle') hint.textContent = 'Your last idea was saved';
+    }
+    await clearDraft(d.startedAt);
+  })().catch(() => undefined);
   void micPermissionGranted().then((ok) => {
     if (ok) void recorder.warm().catch(() => undefined);
   });
   document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushDraft();
     if (document.hidden && !recorder.isRecording) recorder.release();
   });
 
@@ -642,16 +692,22 @@ export function mountMobile(root: HTMLElement): void {
         const warm = recorder.isWarm;
         await recorder.start();
         if (!warm) recStart = performance.now();
+        draftAt = Date.now();
+        flushed = 0;
       } catch (e) {
         setView('idle');
-        hint.textContent = `Microphone: ${e instanceof Error ? e.message : String(e)}`;
+        hint.textContent = micTrouble(e);
       } finally {
         starting = false;
       }
       return;
     }
     const { samples, sampleRate } = await recorder.stop();
+    const wasCut = cutOff;
+    cutOff = false;
+    const at = draftAt;
     if (samples.length < sampleRate * 0.6) {
+      dropDraft(at);
       tappedBpm = null;
       pulse = null;
       resetTap();
@@ -662,7 +718,7 @@ export function mountMobile(root: HTMLElement): void {
     const d = new Date();
     current = {
       id: newId(),
-      name: `Idea ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`,
+      name: ideaName(d),
       createdAt: Date.now(),
       sampleRate,
       samples,
@@ -679,7 +735,8 @@ export function mountMobile(root: HTMLElement): void {
     tappedBpm = null;
     pulse = null;
     resetTap();
-    await saveRecording(current).catch(() => undefined);
+    // Saved for real: the pieces aren't needed any more.
+    if (await storeRecording(current).then(() => true, () => false)) dropDraft(at);
     await analyze('normal');
     if (bpm && current?.analysis) {
       // The tap is a hint: the tempo is read from the singing, near what was tapped.
@@ -693,6 +750,8 @@ export function mountMobile(root: HTMLElement): void {
       await saveRecording(current, false).catch(() => undefined);
       render();
     }
+    resetUndo();
+    if (wasCut) flashHint('The mic cut out, kept what you sang');
   }
   // ---------- tap tempo + count-in ----------
   // Four taps on "tap tempo" set the beat; four clicks follow at that tempo, and recording starts on
@@ -721,6 +780,19 @@ export function mountMobile(root: HTMLElement): void {
       tapBtn.classList.remove('beat');
       void tapBtn.offsetWidth;
       tapBtn.classList.add('beat');
+      // Felt and seen, never heard: a buzz, and a ring that leaves the button and runs out
+      // over the whole screen on each beat.
+      const one = (((n - 1) % 4) + 4) % 4 === 0; // the count-in's accented click was the one
+      beatPulse(one);
+      const b = recBtn.getBoundingClientRect();
+      const cx = b.left + b.width / 2;
+      const cy = b.top + b.height / 2;
+      const reach = 2 * Math.hypot(Math.max(cx, innerWidth - cx), Math.max(cy, innerHeight - cy));
+      const ring = document.createElement('i');
+      ring.className = one ? 'm-beat one' : 'm-beat';
+      ring.style.cssText = `left:${cx}px;top:${cy}px;--from:${b.width}px;--to:${reach}px;--beat:${Math.min(1.4, pulse.beat * 1.6)}s`;
+      ring.addEventListener('animationend', () => ring.remove());
+      document.body.appendChild(ring);
     }
     requestAnimationFrame(keepPulse);
   }
@@ -788,6 +860,7 @@ export function mountMobile(root: HTMLElement): void {
           () => {
             if (k <= 4) {
               lightDots(5 - k);
+              beatPulse(k === 1);
               hint.textContent = String(5 - k);
             } else {
               countIn = [];
@@ -867,7 +940,7 @@ export function mountMobile(root: HTMLElement): void {
       if (!showing) next();
     };
     try {
-      rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, essentiaOn() ? 'auto' : 'js', onStage, rec.source ?? 'auto', quality);
+      rec.analysis = await analyzeInWorker(rec.samples, rec.sampleRate, 'js', onStage, rec.source ?? 'auto', quality);
       delete rec.editedNotes;
       await saveRecording(rec, false).catch(() => undefined);
       // Let the steps still waiting have their turn, then the last notes of the tune land.
@@ -988,12 +1061,10 @@ export function mountMobile(root: HTMLElement): void {
     dustEl.value = String(Math.round(dustOf(current) * 100));
     const layers = current?.layers ?? [];
     $<HTMLElement>('m-layer-n').innerHTML = layers.slice(0, 5).map((l) => `<i class="${l.muted ? '' : 'hot'}"></i>`).join('');
-// Each layer is a small chip on the melody in the colour of its line: tap it and the layer is gone (Undo brings it back).
-    laysEl.innerHTML =
-      layers.map((l, i) => `<button class="m-lay${l.muted ? ' off' : ''}" data-i="${i}" style="--c:var(${LAYER_COLOURS[i % LAYER_COLOURS.length]})" aria-label="Remove layer ${i + 1}">✕</button>`).join('') +
-      (gone ? '<button class="m-lay-undo" data-undo>Undo</button>' : '');
+    // Each layer is a small chip on the melody in the colour of its line: tap it and the layer is gone (undo brings it back).
+    laysEl.innerHTML = layers.map((l, i) => `<button class="m-lay${l.muted ? ' off' : ''}" data-i="${i}" style="--c:var(${LAYER_COLOURS[i % LAYER_COLOURS.length]})" aria-label="Remove layer ${i + 1}">✕</button>`).join('');
     layersEl.hidden = layers.length === 0;
-    layersEl.innerHTML = layers.map((l, i) => `<button class="m-toggle" data-layer="${i}" aria-pressed="${!l.muted}" aria-label="Layer ${i + 1}">${i + 1}</button>`).join('') + '<button class="m-toggle" data-undo>Undo</button>';
+    layersEl.innerHTML = layers.map((l, i) => `<button class="m-toggle" data-layer="${i}" aria-pressed="${!l.muted}" aria-label="Layer ${i + 1}">${i + 1}</button>`).join('');
     const genre = GENRES.find((g) => g.id === genreOf(current)) ?? GENRES[0];
     $<HTMLElement>('m-genre').textContent = genre.label;
     $<HTMLElement>('m-genre').setAttribute('aria-label', `Genre: ${genre.label}`);
@@ -1120,7 +1191,7 @@ export function mountMobile(root: HTMLElement): void {
       if (!renaming) return;
       renaming = false;
       title.classList.remove('editing');
-      const name = input.value.replace(/s+/g, ' ').trim();
+      const name = input.value.replace(/\s+/g, ' ').trim();
       if (keep && name && name !== rec.name) {
         rec.name = name;
         void saveRecording(rec, false).catch(() => undefined);
@@ -1132,6 +1203,87 @@ export function mountMobile(root: HTMLElement): void {
       else if (e.key === 'Escape') done(false);
     });
     input.addEventListener('blur', () => done(true));
+  });
+
+  // ---------- undo ----------
+  // Every change to a take goes through saveRecording, which keeps the state from before it.
+  // Changes a moment apart (a drag, a slider) count as one. Opening another take starts afresh.
+  type Snap = { data: string; analysis: StoredRecording['analysis']; layers: Layer[]; lkey: string };
+  function snapOf(r: StoredRecording): Snap {
+    const { samples: _s, analysis, layers, ...rest } = r;
+    void _s;
+    const ls = (layers ?? []).map((l) => ({ ...l }));
+    return { data: JSON.stringify(rest), analysis, layers: ls, lkey: ls.map((l) => `${l.id}${l.muted ? '-' : '+'}`).join() };
+  }
+  const sameSnap = (a: Snap, b: Snap): boolean => a.data === b.data && a.analysis === b.analysis && a.lkey === b.lkey;
+  let undos: Snap[] = [];
+  let base: Snap | null = null;
+  let baseId = '';
+  /** Set while a finger swipes through chords: everything it changes undoes as one step. */
+  let gesture: number | null = null;
+  let lastGesture: number | null = null;
+  const undoBtn = $<HTMLButtonElement>('m-undo');
+  function paintUndo(): void {
+    undoBtn.hidden = !(view === 'result' && undos.length > 0 && current?.id === baseId);
+  }
+  /** Start the history afresh from the take as it is now. */
+  function resetUndo(): void {
+    undos = [];
+    base = current?.analysis ? snapOf(current) : null;
+    baseId = current?.id ?? '';
+    paintUndo();
+  }
+  function saveRecording(rec: StoredRecording, includeAudio = true): Promise<void> {
+    if (rec === current && rec.analysis) {
+      const now = snapOf(rec);
+      if (!base || baseId !== rec.id) {
+        undos = [];
+        baseId = rec.id;
+      } else if (!sameSnap(now, base)) {
+        if (gesture === null || gesture !== lastGesture || !undos.length) undos.push(base);
+        if (undos.length > 60) undos.shift();
+        lastGesture = gesture;
+      }
+      base = now;
+      paintUndo();
+    }
+    return storeRecording(rec, includeAudio);
+  }
+  /** In a word, what an undo step changes back. */
+  const UNDO_WORDS: Record<string, string> = {
+    name: 'name', wand: 'wand', spice: 'spice', chill: 'chill', chordEdits: 'chord', editedNotes: 'note',
+    overrides: 'key / tempo', vibe: 'vibe', genre: 'genre', drums: 'drums', keys: 'chords on/off',
+    drumFeel: 'drums feel', keysFeel: 'piano feel', dust: 'dust', rain: 'rain', tune: 'tune', voiceFx: 'voice fx',
+  };
+  function undoneWhat(now: Snap | null, prev: Snap): string {
+    if (!now) return 'change';
+    if (now.lkey !== prev.lkey) return 'layer';
+    if (now.analysis !== prev.analysis) return 'enhance';
+    const a = JSON.parse(now.data) as Record<string, unknown>;
+    const b = JSON.parse(prev.data) as Record<string, unknown>;
+    // A vibe sets several things at once: call it the vibe.
+    if (JSON.stringify(a.vibe) !== JSON.stringify(b.vibe)) return 'vibe';
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return UNDO_WORDS[k] ?? 'change';
+    }
+    return 'change';
+  }
+  undoBtn.addEventListener('click', () => {
+    const prev = undos.pop();
+    const rec = current;
+    if (!prev || !rec || rec.id !== baseId) return paintUndo();
+    const layersMoved = base?.lkey !== prev.lkey;
+    const keep = { id: rec.id, createdAt: rec.createdAt, sampleRate: rec.sampleRate, samples: rec.samples };
+    for (const k of Object.keys(rec)) delete (rec as unknown as Record<string, unknown>)[k];
+    Object.assign(rec, JSON.parse(prev.data), keep, { analysis: prev.analysis, layers: prev.layers.map((l) => ({ ...l })) });
+    const what = undoneWhat(base, prev);
+    base = snapOf(rec);
+    lastGesture = null;
+    paintUndo();
+    void storeRecording(rec, layersMoved).catch(() => undefined);
+    render();
+    if (player.playing) void startPlayback(player.position);
+    flashHint(`undid ${what}${undos.length ? ` · ${undos.length} more` : ''}`);
   });
 
   function save(): void {
@@ -1219,6 +1371,9 @@ export function mountMobile(root: HTMLElement): void {
 
   // Tap a chord = pick it; swipe it up / down = the next / previous best fit.
   let swipe: { i: number; x: number; y: number; moved: boolean } | null = null;
+  chordsEl.addEventListener('pointerdown', () => (gesture = performance.now()), { capture: true });
+  chordsEl.addEventListener('pointerup', () => (gesture = null), { capture: true });
+  chordsEl.addEventListener('pointercancel', () => (gesture = null), { capture: true });
   chordsEl.addEventListener('pointerdown', (e) => {
     const b = (e.target as HTMLElement).closest<HTMLButtonElement>('.m-chord');
     if (!b) return;
@@ -1784,14 +1939,16 @@ export function mountMobile(root: HTMLElement): void {
     playBtn.setAttribute('aria-label', 'Stop');
     follow();
   }
-  // Export: what you hear, as an MP3. The loop twice over, then the last chord rings out.
+  // Export: what you hear, as an MP3, on whole bars so it drops into anything and loops clean.
+  // Loop on: the loop twice over. Loop off: the whole idea once, from its first bar line to the
+  // bar line after the last note. Then the last chord rings out.
   const exportBtn = $<HTMLButtonElement>('m-export');
   let exporting = false;
   exportBtn.addEventListener('click', () => {
     if (exporting || !current) return;
     stopPlayback();
-    // With Loop off: the whole take, once.
-    const lp = on(toggles.loop) ? loopSpan() : null;
+    const lp = loopSpan();
+    const passes = on(toggles.loop) ? 2 : 1;
     const p = playOptions(lp ? lp[0] : 0, lp);
     if (!p) return;
     const name = fileName(current.name);
@@ -1820,7 +1977,7 @@ export function mountMobile(root: HTMLElement): void {
     void (async () => {
       try {
         // Rendering is most of the work (to 75%), then the MP3.
-        const buf = await player.render(p.samples, p.sampleRate, p.o, 2, (f) => {
+        const buf = await player.render(p.samples, p.sampleRate, p.o, passes, (f) => {
           done = 0.75 * f;
           if (f > 0.5) word('pressing the vinyl');
         });
@@ -1967,8 +2124,9 @@ export function mountMobile(root: HTMLElement): void {
       jam.length = 0;
       layerBtn.classList.add('on');
       layerBtn.setAttribute('aria-label', 'Keep what I sang');
-    } catch {
+    } catch (e) {
       layering = null; // no microphone
+      flashHint(micTrouble(e));
     } finally {
       starting = false;
     }
@@ -2027,8 +2185,6 @@ export function mountMobile(root: HTMLElement): void {
   }
 layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startLayer()));
   const laysEl = $<HTMLDivElement>('m-lays');
-  /** The layer just removed, kept for a few seconds so one tap brings it back. */
-  let gone: { layer: Layer; i: number; timer: ReturnType<typeof setTimeout> } | null = null;
   function layersChanged(): void {
     if (!current) return;
     void saveRecording(current).catch(() => undefined);
@@ -2038,28 +2194,10 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
   laysEl.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     if (!current) return;
-    if (t.closest('[data-undo]')) {
-      if (!gone) return;
-      clearTimeout(gone.timer);
-      (current.layers ??= []).splice(gone.i, 0, gone.layer);
-      gone = null;
-      layersChanged();
-      return;
-    }
     const b = t.closest<HTMLButtonElement>('.m-lay');
     const layers = current.layers;
     if (!b || !layers) return;
-    const i = Number(b.dataset.i);
-    if (gone) clearTimeout(gone.timer);
-    const [layer] = layers.splice(i, 1);
-    gone = {
-      layer,
-      i,
-      timer: setTimeout(() => {
-        gone = null;
-        render();
-      }, 6000),
-    };
+    layers.splice(Number(b.dataset.i), 1);
     layersChanged();
   });
   layersEl.addEventListener('click', (e) => {
@@ -2067,8 +2205,7 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
     const layers = current?.layers;
     if (!current || !layers?.length) return;
     const b = t.closest<HTMLButtonElement>('[data-layer]');
-    if (t.closest('[data-undo]')) layers.pop();
-    else if (b) {
+    if (b) {
       const l = layers[Number(b.dataset.layer)];
       l.muted = !l.muted;
     } else return;
@@ -2112,36 +2249,84 @@ layerBtn.addEventListener('click', () => void (layering ? finishLayer() : startL
       del.className = 'm-take-del';
       del.textContent = '✕';
       del.setAttribute('aria-label', `Delete ${m.name}`);
-      del.addEventListener('click', () => {
-        if (!confirm(`Delete "${m.name}"? This can't be undone.`)) return;
-        void deleteRecording(m.id).then(() => {
-          if (current?.id === m.id) {
-            stopPlayback();
-            current = null;
-            setView('idle');
-          }
-          return openSheet();
-        });
+      del.addEventListener('click', () => void removeTake(row, m.id, m.name));
+      // Swipe the row left to delete it.
+      let sx: { x: number; y: number; id: number } | null = null;
+      let dx = 0;
+      row.addEventListener('pointerdown', (e) => {
+        sx = { x: e.clientX, y: e.clientY, id: e.pointerId };
+        dx = 0;
       });
+      row.addEventListener('pointermove', (e) => {
+        if (!sx || e.pointerId !== sx.id) return;
+        const x = e.clientX - sx.x;
+        if (dx === 0 && Math.abs(e.clientY - sx.y) > Math.abs(x)) return void (sx = null); // scrolling
+        dx = Math.min(0, x);
+        if (dx < -8) {
+          row.setPointerCapture(e.pointerId);
+          row.classList.add('dragging');
+          row.style.transform = `translateX(${dx}px)`;
+        }
+      });
+      const letGo = (): void => {
+        if (!sx) return;
+        sx = null;
+        row.classList.remove('dragging');
+        if (dx < -Math.min(110, row.offsetWidth * 0.3)) void removeTake(row, m.id, m.name);
+        else row.style.transform = '';
+      };
+      row.addEventListener('pointerup', letGo);
+      row.addEventListener('pointercancel', letGo);
+      // A swipe isn't a tap on the take.
+      main.addEventListener('click', (e) => {
+        if (dx < -8) e.stopImmediatePropagation();
+      }, { capture: true });
       row.append(main, del);
       listEl.appendChild(row);
     }
     sheet.hidden = false;
   }
+  const goneBar = $<HTMLDivElement>('m-gone');
+  let goneTake: { rec: StoredRecording; timer: ReturnType<typeof setTimeout> } | null = null;
+  async function removeTake(row: HTMLElement, id: string, name: string): Promise<void> {
+    const rec = await loadRecording(id);
+    if (!rec) return;
+    row.classList.add('leaving');
+    row.style.transform = 'translateX(-110%)';
+    await deleteRecording(id);
+    if (current?.id === id) {
+      stopPlayback();
+      current = null;
+      setView('idle');
+    }
+    if (goneTake) clearTimeout(goneTake.timer);
+    goneTake = { rec, timer: setTimeout(() => ((goneTake = null), (goneBar.hidden = true)), 6000) };
+    $<HTMLSpanElement>('m-gone-name').textContent = `Deleted ${name}`;
+    goneBar.hidden = false;
+    setTimeout(() => void (sheet.hidden ? undefined : openSheet()), 260);
+  }
+  $<HTMLButtonElement>('m-gone-undo').addEventListener('click', () => {
+    const g = goneTake;
+    if (!g) return;
+    clearTimeout(g.timer);
+    goneTake = null;
+    goneBar.hidden = true;
+    void storeRecording(g.rec).then(() => (sheet.hidden ? undefined : openSheet()));
+  });
+
   async function open(id: string): Promise<void> {
     closeSheet(sheet);
     stopPlayback();
     const rec = await loadRecording(id);
     if (!rec) return;
     current = rec;
-    if (gone) clearTimeout(gone.timer);
-    gone = null;
     cue = 0;
     if (!rec.analysis) await analyze('normal');
     else {
       setView('result');
       render();
     }
+    resetUndo();
   }
   $<HTMLButtonElement>('m-takes').addEventListener('click', () => void openSheet());
   sheet.addEventListener('click', (e) => {

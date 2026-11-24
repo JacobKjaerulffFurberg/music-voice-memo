@@ -1718,3 +1718,123 @@ button:active {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 0.94 0 0 0 0 0.86 0 0 0 0.17 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 }
+
+/* Undo sits next to More, only when there is something to undo. */
+.m-top-r {
+  display: flex;
+  align-items: center;
+}
+.m-icon[hidden] {
+  display: none;
+}
+
+/* Takes: swipe a row left to delete it. */
+.m-take {
+  touch-action: pan-y;
+  transition:
+    transform 220ms ease,
+    opacity 220ms ease;
+}
+.m-take.dragging {
+  transition: none;
+}
+.m-take.leaving {
+  opacity: 0;
+}
+
+/* "Deleted …  Undo", for a few seconds after a take goes. */
+.m-gone {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: calc(100vw - 32px);
+  padding: 6px 6px 6px 18px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg);
+  box-shadow: var(--soft);
+  font-family: var(--serif);
+  font-size: 14px;
+  animation: m-gone-in 220ms ease;
+}
+.m-gone[hidden] {
+  display: none;
+}
+.m-gone span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.m-gone button {
+  flex: none;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 18px;
+  background: var(--note);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+}
+@keyframes m-gone-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}
+
+/* A row swiped away mustn't widen the list. */
+#m-list {
+  overflow-x: hidden;
+}
+
+/* More only shows on a take (it has nothing to change while recording); its place is kept. */
+.m-icon.away {
+  visibility: hidden;
+}
+
+/* Recording after a tapped tempo: on each beat a ring leaves the record button and runs out over
+   the whole screen, fading as it goes; a little stronger on the one. Width is animated (not scale)
+   so the line stays thin all the way out. */
+.m-beat {
+  position: fixed;
+  width: var(--from);
+  height: var(--from);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  animation: m-beat var(--beat, 0.8s) linear forwards;
+  --peak: 0.35;
+}
+.m-beat.one {
+  border-width: 2.5px;
+  --peak: 0.6;
+}
+@keyframes m-beat {
+  from {
+    width: var(--from);
+    height: var(--from);
+    opacity: var(--peak);
+  }
+  /* Still clearly there halfway across the screen, gone only at the edges. */
+  60% {
+    opacity: calc(var(--peak) * 0.6);
+  }
+  to {
+    width: var(--to);
+    height: var(--to);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-beat {
+    display: none;
+  }
+}

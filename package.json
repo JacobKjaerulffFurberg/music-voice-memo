@@ -22,6 +22,7 @@
     "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.6.2",
     "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/haptics": "^8.0.2",
     "@capacitor/ios": "^8.6.2",
     "@capacitor/share": "^8.0.3",
     "@capgo/capacitor-updater": "^8.54.2",
