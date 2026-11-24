@@ -20,6 +20,7 @@ import { foldOntoLoop, roughLevel } from '../music/layers';
 import { cancelBleed, findDelay } from '../audio/bleed';
 import { alignToGrid, lofiDownbeat } from '../music/lofi';
 import { takeChords } from '../music/progression';
+import { keyChoices } from '../music/wand';
 import type { Mode } from '../analysis/types';
 import { velocityOf } from '../analysis/velocity';
 import { beatPulse } from '../haptics';
@@ -74,7 +75,7 @@ const TEMPLATE = `
       <div class="m-live" id="m-live"></div>
       <div class="m-timer" id="m-timer"></div>
       <button class="m-tap" id="m-tap" aria-label="Tap the tempo four times, then sing after four clicks"><span class="m-tap-dots" id="m-tap-dots"><i></i><i></i><i></i><i></i></span><b id="m-tap-label">tap tempo</b></button>
-      <p class="m-hint" id="m-hint">Sing</p>
+      <p class="m-hint" id="m-hint"></p>
     </div>
   </section>
 
@@ -89,7 +90,7 @@ const TEMPLATE = `
     <div class="m-melody-wrap">
       <canvas class="m-melody" id="m-melody"></canvas>
       <div class="m-lays" id="m-lays"></div>
-      <button class="m-wand" id="m-wand" aria-label="Surprise me: a new take on the chords">${ICON.wand}</button>
+      <button class="m-wand" id="m-wand" aria-label="Magic wand: try the song in another key it fits">${ICON.wand}</button>
       <button class="m-vfx" id="m-vfx" aria-label="Voice effects">${ICON.sparkle}<span class="m-pips" id="m-vfx-pips"></span></button>
       <button class="m-chill" id="m-chill" aria-label="Chill the chords">${ICON.cup}<span class="m-pips" id="m-chill-pips"></span></button>
       <div class="m-toast" id="m-toast" aria-live="polite"></div>
@@ -274,7 +275,7 @@ export function mountMobile(root: HTMLElement): void {
   });
   // Voice effects (on the melody, always there): tap to crank them, per take.
   const VFX = ['voice: natural', 'voice: warm room', 'voice: old radio + echo'];
-  const vfxOf = (r: { voiceFx?: number } | null): number => Math.max(0, Math.min(2, r?.voiceFx ?? 0));
+  const vfxOf = (r: { voiceFx?: number } | null): number => Math.max(0, Math.min(2, r?.voiceFx ?? 1));
   $<HTMLButtonElement>('m-vfx').addEventListener('click', () => {
     if (!current) return;
     current.voiceFx = (vfxOf(current) + 1) % 3;
@@ -510,7 +511,7 @@ export function mountMobile(root: HTMLElement): void {
     }
     // Tapped in: the beat you set runs under the singing, a stronger line on each bar's one.
     if (pulse && clickCtx) {
-      const lag = clickCtx.currentTime - now; // click clock → roll clock
+      const lag = clickCtx.currentTime - heardLag() - now; // click clock (as heard) → roll clock
       const first = Math.ceil((now - win - 0.5 + lag - pulse.t0) / pulse.beat);
       const last = Math.floor((now + lag - pulse.t0) / pulse.beat);
       for (let n = first; n <= last; n++) {
@@ -572,7 +573,7 @@ export function mountMobile(root: HTMLElement): void {
     if (v === 'idle') {
       live.textContent = '';
       timer.textContent = '';
-      hint.textContent = IDEAS[0];
+      hint.textContent = '';
       title.textContent = '';
       title.classList.remove('can');
     }
@@ -581,19 +582,6 @@ export function mountMobile(root: HTMLElement): void {
     root.querySelector('#m-adv')?.classList.toggle('away', v !== 'result');
   }
 
-  // Idle: the hint drifts slowly between the things you can record.
-  const IDEAS = ['Sing', 'Whistle', 'Hum', 'Play'];
-  let idea = 0;
-  setInterval(() => {
-    if (view !== 'idle' || countIn.length || !IDEAS.includes(hint.textContent ?? '')) return;
-    hint.classList.add('fading');
-    setTimeout(() => {
-      if (view !== 'idle' || !IDEAS.includes(hint.textContent ?? '')) return hint.classList.remove('fading');
-      idea = (idea + 1) % IDEAS.length;
-      hint.textContent = IDEAS[idea];
-      hint.classList.remove('fading');
-    }, 700);
-  }, 3200);
 
   // ---------- recording ----------
   const recorder = new Recorder({
@@ -766,13 +754,51 @@ export function mountMobile(root: HTMLElement): void {
   let tappedBpm: number | null = null;
   /** The beat the taps set, on clickCtx's clock: the dots keep it while recording. */
   let pulse: { t0: number; beat: number } | null = null;
+  /**
+   * How long after it is scheduled a click comes out of the speaker. The buzz, the ring, the dots
+   * and the beat lines all follow the click as it is heard, not as it is scheduled.
+   */
+  const heardLag = (): number => (clickCtx ? (clickCtx.outputLatency || 0) + (clickCtx.baseLatency || 0) : 0);
+  /** A buzz is felt a little after it is asked for (the bridge to the phone, the motor spinning up). */
+  const BUZZ_LEAD = isNativeApp() ? 0.03 : 0.015;
+  let buzzTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Buzz (and ring) on the next beat, then the one after, through the count-in and the take. */
+  function armBuzz(): void {
+    clearTimeout(buzzTimer);
+    if (!pulse || !clickCtx || !(countIn.length || view === 'recording')) return;
+    const P = pulse;
+    const now = clickCtx.currentTime;
+    const at = (n: number): number => P.t0 + n * P.beat + heardLag();
+    let n = Math.max(1, Math.ceil((now - heardLag() - P.t0) / P.beat));
+    while (at(n) - BUZZ_LEAD < now + 0.004) n++;
+    buzzTimer = setTimeout(() => {
+      if (pulse !== P || !(countIn.length || view === 'recording')) return;
+      const one = (((n - 1) % 4) + 4) % 4 === 0; // the count-in's accented click is the one
+      beatPulse(one);
+      // The ring shows the beat as it is heard: it leaves when the buzz lands.
+      setTimeout(() => (view === 'recording' ? beatRing(one, P.beat) : undefined), BUZZ_LEAD * 1000);
+      armBuzz();
+    }, Math.max(0, (at(n) - BUZZ_LEAD - now) * 1000));
+  }
+  /** A ring that leaves the record button and runs out over the whole screen. */
+  function beatRing(one: boolean, beat: number): void {
+    const b = recBtn.getBoundingClientRect();
+    const cx = b.left + b.width / 2;
+    const cy = b.top + b.height / 2;
+    const reach = 2 * Math.hypot(Math.max(cx, innerWidth - cx), Math.max(cy, innerHeight - cy));
+    const ring = document.createElement('i');
+    ring.className = one ? 'm-beat one' : 'm-beat';
+    ring.style.cssText = `left:${cx}px;top:${cy}px;--from:${b.width}px;--to:${reach}px;--beat:${Math.min(1.4, beat * 1.6)}s`;
+    ring.addEventListener('animationend', () => ring.remove());
+    document.body.appendChild(ring);
+  }
   function keepPulse(): void {
     if (!pulse || !clickCtx || view !== 'recording') {
       tapBtn.classList.remove('live');
       return;
     }
     tapBtn.classList.add('live');
-    const n = Math.floor((clickCtx.currentTime - pulse.t0) / pulse.beat + 0.03);
+    const n = Math.floor((clickCtx.currentTime - heardLag() - pulse.t0) / pulse.beat + 0.03);
     const on = ((n % 4) + 4) % 4;
     if (tapBtn.dataset.n !== String(n)) {
       tapBtn.dataset.n = String(n);
@@ -780,19 +806,6 @@ export function mountMobile(root: HTMLElement): void {
       tapBtn.classList.remove('beat');
       void tapBtn.offsetWidth;
       tapBtn.classList.add('beat');
-      // Felt and seen, never heard: a buzz, and a ring that leaves the button and runs out
-      // over the whole screen on each beat.
-      const one = (((n - 1) % 4) + 4) % 4 === 0; // the count-in's accented click was the one
-      beatPulse(one);
-      const b = recBtn.getBoundingClientRect();
-      const cx = b.left + b.width / 2;
-      const cy = b.top + b.height / 2;
-      const reach = 2 * Math.hypot(Math.max(cx, innerWidth - cx), Math.max(cy, innerHeight - cy));
-      const ring = document.createElement('i');
-      ring.className = one ? 'm-beat one' : 'm-beat';
-      ring.style.cssText = `left:${cx}px;top:${cy}px;--from:${b.width}px;--to:${reach}px;--beat:${Math.min(1.4, pulse.beat * 1.6)}s`;
-      ring.addEventListener('animationend', () => ring.remove());
-      document.body.appendChild(ring);
     }
     requestAnimationFrame(keepPulse);
   }
@@ -860,7 +873,6 @@ export function mountMobile(root: HTMLElement): void {
           () => {
             if (k <= 4) {
               lightDots(5 - k);
-              beatPulse(k === 1);
               hint.textContent = String(5 - k);
             } else {
               countIn = [];
@@ -868,10 +880,11 @@ export function mountMobile(root: HTMLElement): void {
               void toggleRecord().then(() => requestAnimationFrame(keepPulse));
             }
           },
-          Math.max(0, (at - (clickCtx?.currentTime ?? 0)) * 1000 - (k === 5 ? 40 : 0)),
+          Math.max(0, (at + (k <= 4 ? heardLag() : 0) - (clickCtx?.currentTime ?? 0)) * 1000 - (k === 5 ? 40 : 0)),
         ),
       );
     }
+    armBuzz();
   });
 
   recBtn.addEventListener('click', () => {
@@ -1136,22 +1149,31 @@ export function mountMobile(root: HTMLElement): void {
       setTimeout(() => p.remove(), 750);
     }
   }
+  // The wand jams on where home is: each tap moves the song to the next key the melody also fits
+  // (G major → E minor → A minor → C major …), and round again with fresh chord colours.
   wandBtn.addEventListener('click', () => {
     const s0 = settings();
-    if (!current || !s0) return;
+    const a = current ? effectiveAnalysis(current) : null;
+    if (!current || !s0 || !a) return;
     const before = chords.map((c) => c.name);
     if (!current.spice) current.spice = 2;
-    let best = current.wand;
-    let most = -1;
-    for (let k = 0; k < 12; k++) {
+    const heard = a.key.chosen ? { tonic: a.key.chosen.tonic, mode: a.key.chosen.mode } : s0.key ? { tonic: s0.key.tonic, mode: s0.key.mode } : null;
+    const keys = keyChoices(a.notes, heard);
+    if (!keys.length) return;
+    const now = s0.key ? keys.findIndex((k) => k.tonic === s0.key?.tonic && k.mode === s0.key?.mode) : -1;
+    const next = keys[(now + 1) % keys.length];
+    const o = current.overrides;
+    if (heard && next.tonic === heard.tonic && next.mode === heard.mode) {
+      // Back home: the heard key, with new colours this time round.
+      delete o.keyTonic;
+      delete o.keyMode;
       current.wand = 2 + Math.floor(Math.random() * 1e6);
-      const diff = computeChords(s0).filter((c, i) => c.name !== before[i]).length;
-      if (diff > most) {
-        most = diff;
-        best = current.wand;
-      }
+    } else {
+      o.keyTonic = next.tonic;
+      o.keyMode = next.mode;
     }
-    current.wand = best;
+    delete current.chordEdits;
+    flashHint(keyName(next.tonic, next.mode));
     wandBtn.classList.remove('spin');
     void wandBtn.offsetWidth; // restart the animation
     wandBtn.classList.add('spin');
@@ -1261,8 +1283,10 @@ export function mountMobile(root: HTMLElement): void {
     if (now.analysis !== prev.analysis) return 'enhance';
     const a = JSON.parse(now.data) as Record<string, unknown>;
     const b = JSON.parse(prev.data) as Record<string, unknown>;
-    // A vibe sets several things at once: call it the vibe.
+    // A vibe sets several things at once: call it the vibe. The wand (and the key sheet) move the key.
     if (JSON.stringify(a.vibe) !== JSON.stringify(b.vibe)) return 'vibe';
+    const keyOf = (x: Record<string, unknown>): string => JSON.stringify([(x.overrides as Record<string, unknown> | undefined)?.keyTonic, (x.overrides as Record<string, unknown> | undefined)?.keyMode]);
+    if (keyOf(a) !== keyOf(b)) return 'key';
     for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return UNDO_WORDS[k] ?? 'change';
     }
@@ -1599,6 +1623,19 @@ export function mountMobile(root: HTMLElement): void {
       c.fillText(ch.name, Math.max(6, xx + 7), HEAD / 2, Math.max(12, w - 10));
     }
 
+    // The pulse: a small tick on every beat along the bottom, taller on each bar's one.
+    {
+      const beat = 60 / s.bpm;
+      const fb = s.firstBeatMs / 1000;
+      const [t0, t1] = [g.t(0), g.t(g.W)];
+      c.fillStyle = col.faint;
+      for (let k = Math.ceil((t0 - fb) / beat); fb + k * beat <= t1; k++) {
+        const bx = Math.round(g.x(fb + k * beat));
+        const one = ((k % 4) + 4) % 4 === 0;
+        c.fillRect(bx, g.H - (one ? 12 : 7), one ? 2 : 1, one ? 12 : 7);
+      }
+    }
+
     // Notes as soft pills: the melody the chords follow. Dotted = where a note was
     // heard before it was pulled into the key (tap it to put the note there).
     const rowH = Math.max(8, Math.min(18, (g.y(g.lo) - g.y(g.lo + 1)) * 0.95));
@@ -1614,9 +1651,18 @@ export function mountMobile(root: HTMLElement): void {
       const tone = under ? `hsl(${hue(under.root)} ${sat(70)}% 72%)` : col.note;
       c.strokeStyle = tone;
       c.fillStyle = tone;
-      c.globalAlpha = held ? 0.95 : 0.7;
+      c.globalAlpha = held ? 0.6 : 0.3;
       pill(c, x0 + 1, yy - rowH / 2 + 1, w - 2, rowH - 2);
       c.fill();
+      c.globalAlpha = held ? 1 : 0.85;
+      c.stroke();
+      // Its name, small, just above it (clear of the voice line that runs through it).
+      if (rowH >= 9) {
+        c.globalAlpha = 0.75;
+        c.fillStyle = tone;
+        c.font = '600 10px system-ui, sans-serif';
+        c.fillText(noteName(held && drag ? drag.midi : n.midi).replace(/-?\d+$/, ''), x0 + 2, yy - rowH / 2 - 6);
+      }
       const gh = held ? undefined : ghosts.find((x) => x.i === i);
       if (gh) {
         c.globalAlpha = 0.6;
@@ -1631,34 +1677,57 @@ export function mountMobile(root: HTMLElement): void {
     // Your voice: the scribble on top of the notes.
     const tune = a.tuning.cents / 100;
     const tr = a.pitch;
-    c.strokeStyle = col.line;
-    c.lineWidth = 2;
+    // Your voice over the notes: bright where it sits on its note, warm where it drifts
+    // off it (sharp or flat), quiet where it slides between notes.
+    const smooth = smoothPitch(tr, tune);
+    const byStart = [...shown].sort((p, q) => p.start - q.start);
+    const offTone = `hsl(22 ${sat(85)}% 68%)`;
+    const style = { on: [col.fg, 2.4, 0.95], off: [offTone, 2.4, 0.95], free: [col.line, 1.5, 0.45] } as const;
     c.lineJoin = 'round';
     c.lineCap = 'round';
-    c.globalAlpha = 0.9;
-    c.beginPath();
+    let kind: keyof typeof style | null = null;
     let pen = false;
     let prevM = NaN;
     let prevX = NaN;
-    const smooth = smoothPitch(tr, tune);
+    let prevY = NaN;
+    let ni = 0;
+    const begin = (k: keyof typeof style): void => {
+      if (kind) c.stroke();
+      kind = k;
+      const [stroke, width, alpha] = style[k];
+      c.strokeStyle = stroke;
+      c.lineWidth = width;
+      c.globalAlpha = alpha;
+      c.beginPath();
+    };
     for (let i = 0; i < smooth.length; i++) {
       const m = smooth[i];
-      if (Number.isNaN(m)) {
+      const t = tr.times[i];
+      const xx = g.x(t);
+      if (Number.isNaN(m) || m < g.lo - 1 || m > g.hi + 1) {
         pen = false;
         continue;
       }
-      const xx = g.x(tr.times[i]);
-      if (m < g.lo - 1 || m > g.hi + 1) {
-        pen = false;
-        continue;
+      while (ni < byStart.length && byStart[ni].start + byStart[ni].duration < t) ni++;
+      const note = ni < byStart.length && byStart[ni].start <= t ? byStart[ni] : null;
+      // Sliding into or out of a note isn't singing it out of tune: only a held pitch counts.
+      const back = smooth[Math.max(0, i - 3)];
+      const moving = !Number.isNaN(back) && Math.abs(m - back) > 0.25;
+      const dev = note ? Math.abs(m - note.midi) : Infinity;
+      const k: keyof typeof style = !note || moving || dev > 1.2 ? 'free' : dev < 0.35 ? 'on' : 'off';
+      const joined = pen && Math.abs(m - prevM) < 1.5 && xx - prevX < 8;
+      if (k !== kind) {
+        begin(k);
+        if (joined) c.moveTo(prevX, prevY);
       }
-      if (pen && Math.abs(m - prevM) < 1.5 && xx - prevX < 8) c.lineTo(xx, g.y(m));
+      if (joined) c.lineTo(xx, g.y(m));
       else c.moveTo(xx, g.y(m));
       pen = true;
       prevM = m;
       prevX = xx;
+      prevY = g.y(m);
     }
-    c.stroke();
+    if (kind) c.stroke();
     c.globalAlpha = 1;
 
     // What was sung over it: one line per layer, in the colour of its chip.
@@ -1902,7 +1971,7 @@ export function mountMobile(root: HTMLElement): void {
       notesTuningCents: on(toggles.voice) ? s.tuningCents : 0,
       notesGain: on(toggles.voice) ? 0.16 : 0.28,
       drums: drumsOn() ? grooveDrums(genre, gBpm, gFirst, end, feelOf(current.drumFeel)) : [],
-      drumStyle: genre === 'lofi' ? 'lofi' : 'latin',
+      drumStyle: genre === 'lofi' || genre === 'dream' ? 'lofi' : 'latin',
       rain: rainOn(),
       keysFeel: feelOf(current.keysFeel),
       chords: keysOn() && genre === 'lofi' ? backing : [],
@@ -1915,7 +1984,7 @@ export function mountMobile(root: HTMLElement): void {
             : genre === 'dream'
               ? pads(backing, end, feelOf(current.keysFeel))
               : [],
-      compSound: genre === 'bossa' ? 'pluck' : genre === 'dream' ? 'pad' : 'keys',
+      compSound: genre === 'dream' ? 'pad' : 'keys',
       layers: (current.layers ?? []).filter((l) => !l.muted),
       keysTone: vibeOf(current)?.tone,
       dust: dustOf(current),

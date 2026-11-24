@@ -144,8 +144,11 @@ describe('groove: bossa and dream', () => {
     expect(bossaDrums(120, 0, 2, 0).filter((h) => h.kind === 'kick').map((h) => h.time)).toEqual([0, 1]);
   });
 
-  it('dream has no drums and holds each chord into the next', () => {
-    expect(grooveDrums('dream', 80, 0, 12, 2)).toEqual([]);
+  it('dream keeps a quiet, sparse beat and holds each chord into the next', () => {
+    const d = grooveDrums('dream', 80, 0, 12, 2);
+    const plain = grooveDrums('lofi', 80, 0, 12, 0);
+    expect(d.length).toBe(plain.length); // always the sparsest beat, whatever the feel
+    expect(Math.max(...d.map((h) => h.velocity))).toBeLessThan(Math.max(...plain.map((h) => h.velocity)));
     expect(grooveTempo('dream', 149)).toBe(74.5);
     const p = pads(chords, 4, 0);
     expect(p.filter((n) => n.start === 0).map((n) => n.midi)).toEqual([36, 60, 64, 67]);

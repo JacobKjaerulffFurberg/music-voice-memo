@@ -66,8 +66,8 @@ export const VIBES: Vibe[] = [
   { id: 'cool', dust: 0.35, label: 'Cool', hue: 200, genre: 'lofi', drumFeel: 1, keysFeel: 2, spice: 2, chroma: 0, tone: 3400, room: 0.14, drums: true, spread: 9, sat: 1, backing: 0.6 },
   // Tender: a nylon guitar picking each chord one string at a time over brushes, the voice in a warm room.
   { id: 'soft', dust: 0.3, label: 'Soft', hue: 36, genre: 'bossa', drumFeel: 0, keysFeel: 0, spice: 2, chroma: 0, tone: 2200, room: 0.22, drums: true, spread: 8, sat: 0.9 },
-  // Floating: no drums, slow pads, the voice free, echoing in a big space.
-  { id: 'dream', dust: 0.2, label: 'Dream', hue: 285, genre: 'dream', drumFeel: 0, keysFeel: 1, spice: 3, chroma: 0, tone: 1900, room: 0.5, drums: false, spread: 10, sat: 0.9, echo: 0.28 },
+  // Hazy: soft pads over a quiet, sparse beat, the voice in a gentle room with a faint echo.
+  { id: 'dream', dust: 0.25, label: 'Dream', hue: 285, genre: 'dream', drumFeel: 0, keysFeel: 1, spice: 2, chroma: 0, tone: 1900, room: 0.3, drums: true, spread: 10, sat: 0.9, echo: 0.12 },
   // Late night: half-time on a muffled, deep kit, one soft touch per chord, chords that wander out of the key, rain, the voice far off in a big room.
   { id: 'dark', dust: 0.5, label: 'Dark', hue: 258, genre: 'lofi', drumFeel: 0, keysFeel: 0, spice: 2, chroma: 2, tone: 1250, room: 0.38, drums: true, rain: true, spread: 6, sat: 0.4, drumDark: 1 },
 ];
@@ -109,7 +109,8 @@ export function grooveTempo(genre: Genre, bpm: number): number {
 }
 
 export function grooveDrums(genre: Genre, bpm: number, firstBeatSec: number, endSec: number, feel = 1): DrumHit[] {
-  if (genre === 'dream') return [];
+  // Dream keeps time quietly: the sparsest lo-fi beat, softer.
+  if (genre === 'dream') return lofiDrums(bpm, firstBeatSec, endSec, 0).map((h) => ({ ...h, velocity: h.velocity * 0.6 }));
   if (genre === 'bossa') return bossaDrums(bpm, firstBeatSec, endSec, feel);
   return genre === 'latin' ? latinDrums(bpm, firstBeatSec, endSec, feel) : lofiDrums(bpm, firstBeatSec, endSec, feel);
 }
@@ -336,7 +337,14 @@ export function bossa(chords: Chord[], bpm: number, firstBeatSec: number, endSec
       put(s % 8 === 0 ? c.bass : fifth, t, 3.6 * step, s % 8 === 0 ? 0.75 : 0.55, true);
     }
   }
-  return out.sort((x, y) => x.start - y.start);
+  // A person, not a sequencer: each note a few ms off and a touch louder or softer (the same every time).
+  return out
+    .map((n, i) => {
+      const r = Math.sin(i * 12.9898 + n.midi * 78.233) * 43758.5453;
+      const f = r - Math.floor(r);
+      return { ...n, start: Math.max(0, n.start + (f - 0.5) * 0.024), velocity: Math.max(0.1, n.velocity * (0.88 + 0.24 * f)) };
+    })
+    .sort((x, y) => x.start - y.start);
 }
 
 /**

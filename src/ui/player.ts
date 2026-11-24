@@ -631,7 +631,7 @@ export class Player {
   private voiceSends(ctx: BaseAudioContext, o: PlayOptions): void {
     this.voiceBus(ctx);
     const fx = Math.max(0, Math.min(2, Math.round(o.voiceFx ?? 0)));
-    this.voiceWet?.gain.setTargetAtTime(fx === 2 ? 0.04 : Math.max(o.voiceRoom ?? 0.07, fx === 1 ? 0.34 : 0), ctx.currentTime, 0.05);
+    this.voiceWet?.gain.setTargetAtTime(fx === 2 ? 0.04 : Math.max(o.voiceRoom ?? 0.07, fx === 1 ? 0.4 : 0), ctx.currentTime, 0.05);
     if (this.voiceTone) {
       const t = ctx.currentTime;
       this.voiceTone.high.frequency.setValueAtTime(fx === 2 ? 500 : 20, t);
@@ -1428,8 +1428,8 @@ export class Player {
     const hold = Math.max(start + 0.4, end);
     const env = ctx.createGain();
     env.gain.setValueAtTime(0, start);
-    env.gain.linearRampToValueAtTime(peak, start + Math.min(1.1, (hold - start) * 0.6));
-    env.gain.setTargetAtTime(0, hold, 0.3);
+    env.gain.linearRampToValueAtTime(peak, start + Math.min(0.3, (hold - start) * 0.4));
+    env.gain.setTargetAtTime(0, hold, 0.2);
     const soft = ctx.createBiquadFilter();
     soft.type = 'lowpass';
     soft.frequency.value = Math.min(1800, hz * 3);
