@@ -79,6 +79,8 @@ export interface StoredRecording {
   tune?: boolean;
   /** Phone page: rain ambience. */
   rain?: boolean;
+  /** Phone page: the part of the recording that counts (seconds into it). Outside it is silent and has no notes. */
+  trim?: { start: number; end: number };
   /** Loop region (seconds) and whether looping is on. */
   loop?: { start: number; end: number; on: boolean };
 }

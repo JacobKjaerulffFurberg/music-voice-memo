@@ -15,7 +15,7 @@ import type { Note } from '../analysis/types';
 import { micPermissionGranted, Recorder } from '../audio/recorder';
 import { effectiveAnalysis, effectiveSettings, newId, type Layer, type Settings, type StoredRecording } from '../model';
 import { chordChoices, flavours, prefersSharps, SPICE_LEVELS, type Chord, type ChordChoice } from '../music/arrange';
-import { bossa, DEFAULT_VIBE, dustOf, GENRES, genreOf, grooveDrums, grooveTempo, montuno, pads, VIBES, vibeOf, wearVibe } from '../music/groove';
+import { bassLine, bossa, DEFAULT_VIBE, dustOf, GENRES, genreOf, grooveDrums, grooveTempo, montuno, pads, VIBES, vibeOf, wearVibe } from '../music/groove';
 import { foldOntoLoop, roughLevel } from '../music/layers';
 import { cancelBleed, findDelay } from '../audio/bleed';
 import { alignToGrid, lofiDownbeat } from '../music/lofi';
@@ -986,11 +986,62 @@ export function mountMobile(root: HTMLElement): void {
    * the same take with its phrases slid and gently stretched onto the beat grid
    * (audio, notes and pitch line all moved together). Derived, never stored.
    */
+  // ---------- trim ----------
+  // A take can be trimmed at either end (the fumbling before, the "ok that's it" after). The trimmed
+  // view is silent outside and has no notes there, so chords, loop, drums and export all follow it.
+  let trimMemo: { src: NonNullable<StoredRecording['analysis']>; samples: Float32Array; edited?: Note[]; key: string; part: Pick<StoredRecording, 'samples' | 'analysis' | 'editedNotes'> } | null = null;
+  function trimmedView(rec: StoredRecording): StoredRecording {
+    const tr = rec.trim;
+    const a = rec.analysis;
+    if (!tr || !a) return rec;
+    const key = `${tr.start}|${tr.end}`;
+    if (trimMemo?.src === a && trimMemo.samples === rec.samples && trimMemo.edited === rec.editedNotes && trimMemo.key === key) return { ...rec, ...trimMemo.part };
+    const inside = (n: Note): boolean => {
+      const mid = n.start + n.duration / 2;
+      return mid >= tr.start && mid <= tr.end;
+    };
+    const sr = rec.sampleRate;
+    const i0 = Math.max(0, Math.floor(tr.start * sr));
+    const i1 = Math.min(rec.samples.length, Math.ceil(tr.end * sr));
+    const samples = new Float32Array(rec.samples.length);
+    samples.set(rec.samples.subarray(i0, i1), i0);
+    const fade = Math.min(Math.round(0.015 * sr), (i1 - i0) >> 1);
+    for (let k = 0; k < fade; k++) {
+      samples[i0 + k] *= k / fade;
+      samples[i1 - 1 - k] *= k / fade;
+    }
+    const p = a.pitch;
+    const f0Hz = Float32Array.from(p.f0Hz, (f, i) => (p.times[i] >= tr.start && p.times[i] <= tr.end ? f : 0));
+    const part = { samples, analysis: { ...a, notes: a.notes.filter(inside), pitch: { ...p, f0Hz } }, editedNotes: rec.editedNotes?.filter(inside) };
+    trimMemo = { src: a, samples: rec.samples, edited: rec.editedNotes, key, part };
+    return { ...rec, ...part };
+  }
+  /** Recording time → where it is drawn (the drums slide the singing onto their grid), and back. */
+  function shownTime(t: number): number {
+    return drumsOn() && lofi ? lofi.map(t) : t;
+  }
+  function recTime(x: number): number {
+    if (!current) return x;
+    let lo = 0;
+    let hi = current.samples.length / current.sampleRate;
+    if (!(drumsOn() && lofi)) return Math.max(lo, Math.min(hi, x));
+    for (let k = 0; k < 40; k++) {
+      const mid = (lo + hi) / 2;
+      if (shownTime(mid) < x) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+  /** While a trim handle is held: which one, and where it is (recording time). Applied on release. */
+  let trimDrag: { end: 'start' | 'end'; t: number } | null = null;
+
   function take(): StoredRecording | null {
-    const rec = current;
-    if (!rec || !drumsOn(rec) || !rec.analysis) return rec;
+    const rec0 = current;
+    if (!rec0 || !rec0.analysis) return rec0;
+    const rec = trimmedView(rec0);
+    if (!drumsOn(rec) || !rec.analysis) return rec;
     const s0 = effectiveSettings(rec.analysis, rec.overrides);
-    const key = `${rec.id}|${s0.bpm}|${s0.firstBeatMs}`;
+    const key = `${rec.id}|${s0.bpm}|${s0.firstBeatMs}|${rec0.trim?.start}|${rec0.trim?.end}`;
     if (!lofi || lofi.src !== rec.analysis || lofi.key !== key) {
       const a = rec.analysis;
       const w = alignToGrid(rec.samples, rec.sampleRate, a.notes, s0.bpm, s0.firstBeatMs / 1000);
@@ -1059,7 +1110,14 @@ export function mountMobile(root: HTMLElement): void {
     const first = Math.min(...shown.map((n) => n.start));
     const last = Math.max(...shown.map((n) => n.start + n.duration));
     const lp = loopSpan();
-    return [Math.max(0, Math.min(first - 0.35, lp ? lp[0] - 0.1 : Infinity)), Math.max(Math.min(dur, last + 0.5), lp ? lp[1] + 0.1 : 0)];
+    let lo = Math.max(0, Math.min(first - 0.35, lp ? lp[0] - 0.1 : Infinity));
+    let hi = Math.max(Math.min(dur, last + 0.5), lp ? lp[1] + 0.1 : 0);
+    const all = current?.trim ? (effectiveAnalysis(current)?.notes ?? []) : [];
+    if (all.length) {
+      lo = Math.max(0, Math.min(lo, shownTime(Math.min(...all.map((n) => n.start))) - 0.35));
+      hi = Math.max(hi, Math.min(dur, shownTime(Math.max(...all.map((n) => n.start + n.duration))) + 0.5));
+    }
+    return [lo, hi];
   }
 
   function render(): void {
@@ -1275,7 +1333,7 @@ export function mountMobile(root: HTMLElement): void {
   const UNDO_WORDS: Record<string, string> = {
     name: 'name', wand: 'wand', spice: 'spice', chill: 'chill', chordEdits: 'chord', editedNotes: 'note',
     overrides: 'key / tempo', vibe: 'vibe', genre: 'genre', drums: 'drums', keys: 'chords on/off',
-    drumFeel: 'drums feel', keysFeel: 'piano feel', dust: 'dust', rain: 'rain', tune: 'tune', voiceFx: 'voice fx',
+    drumFeel: 'drums feel', keysFeel: 'piano feel', dust: 'dust', rain: 'rain', tune: 'tune', voiceFx: 'voice fx', trim: 'trim',
   };
   function undoneWhat(now: Snap | null, prev: Snap): string {
     if (!now) return 'change';
@@ -1607,7 +1665,7 @@ export function mountMobile(root: HTMLElement): void {
 
     // Chords: a faint line at each change (names live on the chips below); the one sounding now is lit.
     // Each chord's stretch is washed in its colour; the one sounding now is brighter.
-    const pos = player.playing ? player.position : -1;
+    const pos = player.playing ? player.heardPosition : -1;
     for (const ch of chords) {
       const xx = g.x(ch.start);
       const w = g.x(ch.start + ch.duration) - xx;
@@ -1792,6 +1850,34 @@ export function mountMobile(root: HTMLElement): void {
       c.globalAlpha = 1;
     }
 
+    // Trim: what is cut off is dimmed; a slim handle at each end (at the view's edge when untrimmed).
+    {
+      const own = current ?? rec; // the recording itself (the drums may have stretched rec)
+      const dur0 = own.samples.length / own.sampleRate;
+      const tr = current?.trim;
+      const ts = trimDrag?.end === 'start' ? trimDrag.t : (tr?.start ?? 0);
+      const te = trimDrag?.end === 'end' ? trimDrag.t : (tr?.end ?? dur0);
+      const xs = Math.max(4, Math.min(g.W - 4, g.x(shownTime(ts))));
+      const xe = Math.max(4, Math.min(g.W - 4, g.x(shownTime(te))));
+      c.fillStyle = getComputedStyle(root).getPropertyValue('--bg').trim();
+      c.globalAlpha = 0.72;
+      if (ts > 0.01) c.fillRect(0, 0, xs, g.H);
+      if (te < dur0 - 0.01) c.fillRect(xe, 0, g.W - xe, g.H);
+      for (const [x, which] of [
+        [xs, 'start'],
+        [xe, 'end'],
+      ] as const) {
+        const held = trimDrag?.end === which;
+        c.globalAlpha = held ? 0.9 : 0.35;
+        c.fillStyle = held ? col.accent : col.muted;
+        c.fillRect(Math.round(x) - 0.5, HEAD, 1.5, g.H - HEAD);
+        c.globalAlpha = held ? 1 : 0.8;
+        pill(c, x - 4, g.H / 2 - 16, 8, 32);
+        c.fill();
+      }
+      c.globalAlpha = 1;
+    }
+
     // Start marker + playhead.
     const xc = g.x(cue);
     c.fillStyle = col.muted;
@@ -1802,7 +1888,7 @@ export function mountMobile(root: HTMLElement): void {
     c.closePath();
     c.fill();
     if (player.playing) {
-      const xp = g.x(player.position);
+      const xp = g.x(player.heardPosition);
       c.strokeStyle = col.accent;
       c.lineWidth = 2;
       c.beginPath();
@@ -1833,7 +1919,7 @@ export function mountMobile(root: HTMLElement): void {
         o.keyTonic = s.key.tonic;
         o.keyMode = s.key.mode;
       }
-      const own = drumsOn() ? (effectiveAnalysis(current)?.notes ?? []) : shown;
+      const own = drumsOn() ? (effectiveAnalysis(trimmedView(current))?.notes ?? []) : shown;
       current.editedNotes = own.map((n) => ({ ...n }));
     }
     const n = current.editedNotes[i];
@@ -1874,6 +1960,25 @@ export function mountMobile(root: HTMLElement): void {
       if (ci >= 0) nextChord(ci);
       return;
     }
+    // A trim handle (they win over notes: they sit at the very ends).
+    {
+      const dur0 = current.samples.length / current.sampleRate;
+      const x = e.clientX - r.left;
+      const xs = Math.max(4, Math.min(g.W - 4, g.x(shownTime(current.trim?.start ?? 0))));
+      const xe = Math.max(4, Math.min(g.W - 4, g.x(shownTime(current.trim?.end ?? dur0))));
+      const ds = Math.abs(x - xs);
+      const de = Math.abs(x - xe);
+      if (Math.min(ds, de) < 18) {
+        trimDrag = ds <= de ? { end: 'start', t: current.trim?.start ?? 0 } : { end: 'end', t: current.trim?.end ?? dur0 };
+        try {
+          canvas.setPointerCapture(e.pointerId);
+        } catch {
+          // No capture: the drag still works while it stays on the canvas.
+        }
+        draw();
+        return;
+      }
+    }
     const i = shown.findIndex((nn) => t >= nn.start - 0.05 && t <= nn.start + nn.duration + 0.05);
     if (i < 0) {
       setCue(Math.max(0, t));
@@ -1889,6 +1994,16 @@ export function mountMobile(root: HTMLElement): void {
     }
   });
   canvas.addEventListener('pointermove', (e) => {
+    if (trimDrag && current) {
+      const r = canvas.getBoundingClientRect();
+      const g = geometry();
+      const dur0 = current.samples.length / current.sampleRate;
+      const t = recTime(g.t(e.clientX - r.left));
+      // At least half a second stays.
+      trimDrag.t = trimDrag.end === 'start' ? Math.max(0, Math.min(t, (current.trim?.end ?? dur0) - 0.5)) : Math.min(dur0, Math.max(t, (current.trim?.start ?? 0) + 0.5));
+      draw();
+      return;
+    }
     if (!drag) return;
     const dy = drag.y - e.clientY;
     if (!drag.moved && Math.abs(dy) < 10) return;
@@ -1903,6 +2018,16 @@ export function mountMobile(root: HTMLElement): void {
     draw();
   });
   canvas.addEventListener('pointerup', () => {
+    if (trimDrag && current) {
+      const dur0 = current.samples.length / current.sampleRate;
+      const tr = { start: current.trim?.start ?? 0, end: current.trim?.end ?? dur0, [trimDrag.end]: trimDrag.t };
+      trimDrag = null;
+      // Dragged back to the very ends: no trim at all.
+      if (tr.start <= 0.02 && tr.end >= dur0 - 0.02) delete current.trim;
+      else current.trim = { start: Math.round(tr.start * 1000) / 1000, end: Math.round(tr.end * 1000) / 1000 };
+      refresh();
+      return;
+    }
     const d = drag;
     drag = null;
     const n = d ? shown[d.i] : undefined;
@@ -1920,6 +2045,7 @@ export function mountMobile(root: HTMLElement): void {
     }
   });
   canvas.addEventListener('pointercancel', () => {
+    trimDrag = null;
     drag = null;
     draw();
   });
@@ -1985,6 +2111,8 @@ export function mountMobile(root: HTMLElement): void {
               ? pads(backing, end, feelOf(current.keysFeel))
               : [],
       compSound: genre === 'dream' ? 'pad' : 'keys',
+      // A warm bass under the chords (it comes and goes with them).
+      bass: keysOn() ? bassLine(genre, backing, gBpm, gFirst, end, feelOf(current.drumFeel)) : [],
       layers: (current.layers ?? []).filter((l) => !l.muted),
       keysTone: vibeOf(current)?.tone,
       dust: dustOf(current),
@@ -2120,7 +2248,7 @@ export function mountMobile(root: HTMLElement): void {
     const nowMs = performance.now();
     if (nowMs - followAt < 30) return;
     followAt = nowMs;
-    const p = player.position;
+    const p = player.heardPosition;
     let idx = -1;
     chords.forEach((c, i) => {
       if (p >= c.start && p < c.start + c.duration) idx = i;

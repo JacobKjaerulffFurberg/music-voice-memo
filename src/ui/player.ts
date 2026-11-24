@@ -59,6 +59,8 @@ export interface PlayOptions {
   backing?: number;
   /** Written-out piano + bass part (the Latin montuno), played short and bright instead of `chords`. */
   comp?: CompNote[];
+  /** The bass line (see bassLine in music/groove.ts), on its own warm, round bass. */
+  bass?: CompNote[];
   /** What plays `comp`: the electric piano (default), a nylon-guitar pluck, or slow pads. */
   compSound?: 'keys' | 'pluck' | 'pad';
   /** Layers sung over the take: each plays at its place on the take's timeline, through the voice chain. */
@@ -138,7 +140,20 @@ export class Player {
   /** Current audio position (s), following loop wrap-arounds. */
   get position(): number {
     if (!this.playing || !this.ctx) return this.stopped;
-    const now = this.ctx.currentTime;
+    return this.positionAt(this.ctx.currentTime);
+  }
+
+  /**
+   * Where the music you hear right now is: `position` minus the output latency (tens of ms on a
+   * phone speaker, ~0.2 s on Bluetooth). For what is shown (playhead, the chord lit now) only;
+   * everything that schedules or records keeps using `position`.
+   */
+  get heardPosition(): number {
+    if (!this.playing || !this.ctx) return this.stopped;
+    return this.positionAt(this.ctx.currentTime - this.latency);
+  }
+
+  private positionAt(now: number): number {
     let seg = this.segments[0];
     for (const s of this.segments) if (s.at <= now) seg = s;
     if (!seg) return this.stopped;
@@ -1206,10 +1221,10 @@ export class Player {
           for (let k = 0.5; k * slow < c.duration - 0.2; k += 1) {
             if (k === 0.5 || rnd() < 0.7) touch(c.voicing[Math.floor(rnd() * n)], c.start + k * slow + rnd() * 0.025, force * (0.22 + 0.12 * rnd()));
           }
-          if (c.duration >= 3.2 * slow) touch(c.bass, c.start + 2 * slow + rnd() * 0.015, force * 0.6);
+          if (c.duration >= 3.2 * slow) touch(c.bass, c.start + 2 * slow + rnd() * 0.015, force * 0.6 * (o.bass?.length ? 0.45 : 1));
         }
         // The bass is the left hand of the same piano: it leads, then fades and wavers like every other note.
-        touch(c.bass, c.start + rnd() * 0.01, force * (0.9 + 0.12 * rnd()));
+        touch(c.bass, c.start + rnd() * 0.01, force * (0.9 + 0.12 * rnd()) * (o.bass?.length ? 0.45 : 1));
       });
     } else if (o.chords.length > 0) {
       if (!fx.pad) {
@@ -1258,6 +1273,16 @@ export class Player {
         if (sound === 'pad') this.pad(ctx, bus, hz, t, stop, vel);
         else if (sound === 'pluck') this.pluck(ctx, bus, hz, t, vel, !!n.bass, n.duration);
         else this.rhodes(ctx, bus, hz, t, stop, vel, n.bass ? 0.2 : 0.14);
+      }
+    }
+
+    if (o.bass?.length) {
+      const dest = this.out(ctx);
+      for (const n of o.bass) {
+        if (n.start < a0 || n.start >= b0 || !inStep(n.start)) continue;
+        const t = at + (n.start - a0) + Math.random() * 0.004;
+        const stop = at + (Math.min(b0, n.start + n.duration) - a0);
+        this.bassNote(ctx, dest, mtof(n.midi, o.backingTuningCents ?? 0), t, stop, Math.max(0.15, Math.min(1, n.velocity * (0.93 + 0.14 * Math.random()))));
       }
     }
 
@@ -1491,6 +1516,41 @@ export class Player {
   }
 
   /** Sustained oscillator voice with attack / release envelope. */
+  /**
+   * One bass note: a round sine with a little triangle on top (so a phone speaker, which can't
+   * reach the lowest notes, still hears it), a soft finger-on-string attack that settles, and a
+   * low-pass that closes a touch after the attack. No click at the start or the end.
+   */
+  private bassNote(ctx: BaseAudioContext, dest: AudioNode, hz: number, start: number, end: number, vel: number): void {
+    const peak = 0.24 * vel;
+    const hold = Math.max(start + 0.09, end);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(peak, start + 0.012);
+    env.gain.setTargetAtTime(peak * 0.72, start + 0.012, 0.22);
+    env.gain.setTargetAtTime(0, hold, 0.05);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.6;
+    lp.frequency.setValueAtTime(Math.min(1100, hz * 9), start);
+    lp.frequency.setTargetAtTime(Math.min(520, hz * 5), start + 0.01, 0.12);
+    lp.connect(env).connect(dest);
+    for (const [type, level] of [
+      ['sine', 1],
+      ['triangle', 0.32],
+    ] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = hz;
+      const g = ctx.createGain();
+      g.gain.value = level;
+      osc.connect(g).connect(lp);
+      osc.start(start);
+      osc.stop(hold + 0.4);
+      this.nodes.push(osc);
+    }
+  }
+
   private tone(
     ctx: BaseAudioContext,
     dest: AudioNode,

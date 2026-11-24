@@ -972,16 +972,16 @@ export function mountApp(root: HTMLElement, opts: AppOptions): void {
       showNow(recorder.isRecording ? 'Rec' : 'Live', g.label, cents, g.kind === 'note');
       return;
     }
-    const { now, next } = chordAt(player.position);
+    const { now, next } = chordAt(player.heardPosition);
     showNow('Chord', now?.name ?? '—', next ? `→ ${next.name}` : '');
   }, 100);
 
   // ---------- playback ----------
   let playRaf = 0;
   const follow = (): void => {
-    posEl.textContent = fmtTime(player.position);
-    roll.setPlayhead(player.position);
-    const { now, next } = chordAt(player.position);
+    posEl.textContent = fmtTime(player.heardPosition);
+    roll.setPlayhead(player.heardPosition);
+    const { now, next } = chordAt(player.heardPosition);
     showNow('Now', now?.name ?? '—', next ? `→ ${next.name}` : '');
     if (player.playing) playRaf = requestAnimationFrame(follow);
   };

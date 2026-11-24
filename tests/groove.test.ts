@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Chord } from '../src/music/arrange';
-import { BOSSA, bossa, bossaDrums, CLAVE, DEFAULT_VIBE, dustOf, genreOf, grooveDrums, grooveTempo, latinDrums, montuno, pads, VIBES, vibeOf, wearVibe } from '../src/music/groove';
+import { bassLine, BOSSA, bossa, bossaDrums, CLAVE, DEFAULT_VIBE, dustOf, genreOf, grooveDrums, grooveTempo, latinDrums, montuno, pads, VIBES, vibeOf, wearVibe } from '../src/music/groove';
 import { lofiDrums } from '../src/music/lofi';
 
 const chord = (start: number, duration: number, root: number, voicing: number[]): Chord => ({
@@ -158,5 +158,37 @@ describe('groove: bossa and dream', () => {
     const more = pads(chords, 4, 1);
     expect(more.length).toBe(p.length + 2);
     expect(Math.max(...more.map((n) => n.midi))).toBe(69);
+  });
+});
+
+describe('groove: bass', () => {
+  // One bar each of C and F at 60 bpm (a bar = 4 s).
+  const two = [chord(0, 4, 0, [60, 64, 67]), chord(4, 4, 5, [60, 65, 69])];
+
+  it('plays the root as each chord lands, low and round', () => {
+    const b = bassLine('lofi', two, 60, 0, 8, 0);
+    expect(b.map((n) => [n.start, n.midi])).toEqual([
+      [0, 36],
+      [4, 41],
+    ]);
+    expect(b.every((n) => n.midi >= 33 && n.midi <= 45 && n.bass)).toBe(true);
+    expect(b.every((n) => n.duration <= 1.6 + 1e-9)).toBe(true); // a bass note, not a pad
+  });
+
+  it('adds beat 3 at the normal feel, the fifth and a walk-up when busy', () => {
+    const normal = bassLine('lofi', two, 60, 0, 8, 1);
+    expect(normal.map((n) => n.start)).toEqual([0, 2, 4, 6]);
+    expect(normal[1].midi).toBe(36);
+    const busy = bassLine('lofi', two, 60, 0, 8, 2);
+    expect(busy.find((n) => n.start === 2)?.midi).toBe(43); // G under C
+    expect(busy.find((n) => n.start === 3.5)?.midi).toBe(40); // E, just below the F that comes next
+  });
+
+  it('holds one root per chord in Dream, and leaves Latin and bossa their own bass', () => {
+    const d = bassLine('dream', two, 60, 0, 8, 2);
+    expect(d.map((n) => n.start)).toEqual([0, 4]);
+    expect(d[0].duration).toBeGreaterThan(3.5);
+    expect(bassLine('latin', two, 60, 0, 8, 1)).toEqual([]);
+    expect(bassLine('bossa', two, 60, 0, 8, 1)).toEqual([]);
   });
 });

@@ -369,3 +369,58 @@ export function pads(chords: Chord[], endSec: number, feel = 1): CompNote[] {
 export function dustOf(rec: { dust?: number; vibe?: string } | null | undefined): number {
   return Math.max(0, Math.min(1, rec?.dust ?? vibeOf(rec)?.dust ?? 0.3));
 }
+
+/** Bass notes sit low and round: G1 to A2, where a lo-fi bass lives. */
+function bassRange(m: number): number {
+  let x = m;
+  while (x > 45) x -= 12;
+  while (x < 33) x += 12;
+  return x;
+}
+
+/**
+ * The bass under the band: warm, simple, on the groove's grid. Lo-fi: the root as each chord
+ * lands, again on beat 3 (`feel` 1), plus the fifth and a little walk-up into the next chord
+ * (`feel` 2); sparse (`feel` 0) plays only the roots. Dream: one long root per chord.
+ * Latin and bossa already have their own bass (the piano's left hand, the guitarist's thumb).
+ */
+export function bassLine(genre: Genre, chords: Chord[], bpm: number, firstBeatSec: number, endSec: number, feel = 1): CompNote[] {
+  if (!chords.length || genre === 'latin' || genre === 'bossa') return [];
+  const last = chords[chords.length - 1];
+  const from = chords[0].start;
+  const to = Math.min(endSec, last.start + last.duration);
+  if (genre === 'dream') {
+    return chords
+      .filter((c) => c.start < to)
+      .map((c) => ({ midi: bassRange(c.bass), start: c.start, duration: Math.max(0.2, Math.min(c.start + c.duration, to) - c.start - 0.05), velocity: 0.5, bass: true }));
+  }
+  const beat = 60 / bpm;
+  const bar = 4 * beat;
+  const hits: { t: number; midi: number; v: number }[] = chords.filter((c) => c.start < to).map((c) => ({ t: c.start, midi: bassRange(c.bass), v: 0.82 }));
+  const changeNear = (t: number, w: number): boolean => chords.some((c) => Math.abs(c.start - t) < w);
+  if (feel >= 1) {
+    for (let k = Math.floor((from - firstBeatSec) / bar); firstBeatSec + k * bar < to; k++) {
+      const b = firstBeatSec + k * bar;
+      for (const [beats, kind] of [[0, 'root'], [2, feel >= 2 ? 'fifth' : 'root'], ...(feel >= 2 ? [[3.5, 'walk']] : [])] as [number, string][]) {
+        const t = b + beats * beat;
+        if (t < from || t >= to || changeNear(t, 0.45 * beat)) continue;
+        const c = chordAtTime(chords, t);
+        if (!c) continue;
+        if (kind === 'walk') {
+          // Only into a chord change half a beat later: the note just below its root.
+          const next = chords.find((n) => n.start > t && n.start - t < 0.75 * beat);
+          if (next) hits.push({ t, midi: bassRange(next.bass) - 1, v: 0.5 });
+          continue;
+        }
+        const has5 = chordTones(c.root, c.quality).includes((c.root + 7) % 12);
+        const root = bassRange(c.bass);
+        hits.push({ t, midi: kind === 'fifth' && has5 ? root + 7 - (root + 7 > 45 ? 12 : 0) : root, v: beats === 0 ? 0.72 : 0.62 });
+      }
+    }
+  }
+  hits.sort((x, y) => x.t - y.t);
+  return hits.map((h, i) => {
+    const next = i + 1 < hits.length ? hits[i + 1].t : to;
+    return { midi: h.midi, start: h.t, duration: Math.max(0.12, Math.min(1.6 * beat, next - h.t - 0.04)), velocity: h.v, bass: true };
+  });
+}
